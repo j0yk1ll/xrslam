@@ -5,7 +5,7 @@
 #include <xrslam/utility/ransac.h>
 #include <xrslam/utility/parsac.h>
 #include <xrslam/utility/imu_parsac.h>
-#include <opencv2/calib3d/calib3d_c.h>
+#include <opencv2/calib3d.hpp>
 
 namespace xrslam {
 
@@ -22,7 +22,8 @@ std::vector<matrix<4>> solve_pnp_6pt(const std::array<vector<3>, 6> &Xs,
 
     cv::Mat K = cv::Mat::eye(3, 3, CV_32FC1);
 
-    cv::solvePnP(P3D, P2D, K, cv::noArray(), rvec, tvec, false, CV_EPNP);
+    cv::solvePnP(P3D, P2D, K, cv::noArray(), rvec, tvec, false,
+                 cv::SOLVEPNP_EPNP);
 
     rvec.convertTo(rvec, CV_32F);
     tvec.convertTo(tvec, CV_32F);
@@ -61,7 +62,8 @@ std::vector<matrix<4>> solve_pnp_4pt(const std::array<vector<3>, 4> &Xs,
 
     cv::Mat K = cv::Mat::eye(3, 3, CV_32FC1);
 
-    cv::solvePnP(P3D, P2D, K, cv::noArray(), rvec, tvec, false, CV_EPNP);
+    cv::solvePnP(P3D, P2D, K, cv::noArray(), rvec, tvec, false,
+                 cv::SOLVEPNP_EPNP);
 
     rvec.convertTo(rvec, CV_32F);
     tvec.convertTo(tvec, CV_32F);

@@ -61,10 +61,16 @@ void FeatureTracker::work(std::unique_lock<std::mutex> &l) {
                          j < map->frame_num(); ++j) {
                         Frame *frame_i = map->get_frame(j - 1);
                         Frame *frame_j = map->get_frame(j);
-                        frame_j->preintegration.integrate(
-                            frame_j->image->t, frame_i->motion.bg,
-                            frame_i->motion.ba, false, false);
-                        frame_j->preintegration.predict(frame_i, frame_j);
+                        if (config->has_imu()) {
+                            frame_j->preintegration.integrate(
+                                frame_j->image->t, frame_i->motion.bg,
+                                frame_i->motion.ba, false, false);
+                            frame_j->preintegration.predict(frame_i, frame_j);
+                        } else {
+                            frame_j->pose = frame_i->pose;
+                            frame_j->motion = frame_i->motion;
+                            frame_j->tag(FT_FIX_MOTION) = true;
+                        }
                     }
                 } else {
                     // TODO: unfortunately the frame has slided out, which means
@@ -75,7 +81,7 @@ void FeatureTracker::work(std::unique_lock<std::mutex> &l) {
                 }
             }
             Frame *last_frame = map->get_frame(map->frame_num() - 1);
-            if (!last_frame->preintegration.data.empty()) {
+            if (config->has_imu() && !last_frame->preintegration.data.empty()) {
                 if (frame->preintegration.data.empty() ||
                     (frame->preintegration.data.front().t -
                          last_frame->image->t >
@@ -86,12 +92,19 @@ void FeatureTracker::work(std::unique_lock<std::mutex> &l) {
                         frame->preintegration.data.begin(), imu);
                 }
             }
-            frame->preintegration.integrate(
-                frame->image->t, last_frame->motion.bg, last_frame->motion.ba,
-                false, false);
+            if (config->has_imu()) {
+                frame->preintegration.integrate(
+                    frame->image->t, last_frame->motion.bg,
+                    last_frame->motion.ba, false, false);
+            } else {
+                frame->pose = last_frame->pose;
+                frame->motion = last_frame->motion;
+                frame->tag(FT_FIX_MOTION) = true;
+            }
             last_frame->track_keypoints(frame.get(), config.get());
             if (is_initialized) {
-                frame->preintegration.predict(last_frame, frame.get());
+                if (config->has_imu())
+                    frame->preintegration.predict(last_frame, frame.get());
 #if defined(XRSLAM_IOS)
                 synchronized(keymap) {
                     attach_latest_frame(frame.get());

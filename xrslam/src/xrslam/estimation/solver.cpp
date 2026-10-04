@@ -1,6 +1,7 @@
 #include <ceres/ceres.h>
 #include <xrslam/estimation/ceres/marginalization_factor.h>
 #include <xrslam/estimation/ceres/preintegration_factor.h>
+#include <xrslam/estimation/ceres/visual_marginalization_factor.h>
 #include <xrslam/estimation/ceres/quaternion_parameterization.h>
 #include <xrslam/estimation/ceres/reprojection_factor.h>
 #include <xrslam/estimation/ceres/rotation_factor.h>
@@ -78,7 +79,10 @@ Solver::create_preintegration_prior_factor(
 
 std::unique_ptr<MarginalizationFactor>
 Solver::create_marginalization_factor(Map *map) {
-    return std::make_unique<CeresMarginalizationFactor>(map);
+    if (SolverDetails::config()->has_imu()) {
+        return std::make_unique<CeresMarginalizationFactor>(map);
+    }
+    return std::make_unique<CeresVisualMarginalizationFactor>(map);
 }
 
 void Solver::add_frame_states(Frame *frame, bool with_motion) {
@@ -107,16 +111,29 @@ void Solver::add_frame_states(Frame *frame, bool with_motion) {
 
 void Solver::add_track_states(Track *track) {
     details->problem->AddParameterBlock(&(track->landmark.inv_depth), 1);
+    if (track->tag(TT_FIX_INVD)) {
+        details->problem->SetParameterBlockConstant(
+            &(track->landmark.inv_depth));
+    }
 }
 
 void Solver::add_factor(ReprojectionErrorFactor *rpefactor) {
     CeresReprojectionErrorFactor *rpecost =
         static_cast<CeresReprojectionErrorFactor *>(rpefactor);
+
+    // A track's reference observation defines the inverse-depth anchor and does
+    // not contribute a reprojection residual against itself. Passing it to
+    // Ceres would repeat q/p as both target and reference parameter blocks,
+    // which Ceres rejects.
+    Frame *reference_frame = rpecost->track->first_frame();
+    if (rpecost->frame == reference_frame)
+        return;
+
     details->problem->AddResidualBlock(
         rpecost, details->cauchy_loss.get(),
         rpecost->frame->pose.q.coeffs().data(), rpecost->frame->pose.p.data(),
-        rpecost->track->first_frame()->pose.q.coeffs().data(),
-        rpecost->track->first_frame()->pose.p.data(),
+        reference_frame->pose.q.coeffs().data(),
+        reference_frame->pose.p.data(),
         &(rpecost->track->landmark.inv_depth));
 }
 

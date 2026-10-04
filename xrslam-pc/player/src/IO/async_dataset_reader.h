@@ -16,6 +16,7 @@ class AsyncDatasetReader : public DatasetReader {
     NextDataType next() override;
     void get_image_resolution(int &width, int &height) override;
     std::pair<double, cv::Mat> read_image() override;
+    std::pair<double, cv::Mat> read_depth() override;
     std::pair<double, XRSLAMGyroscope> read_gyroscope() override;
     std::pair<double, XRSLAMAcceleration> read_accelerometer() override;
 
@@ -32,6 +33,7 @@ class AsyncDatasetReader : public DatasetReader {
     std::queue<std::pair<double, XRSLAMGyroscope>> pending_gyroscopes;
     std::queue<std::pair<double, XRSLAMAcceleration>> pending_accelerometers;
     std::queue<std::pair<double, cv::Mat>> pending_images;
+    std::queue<std::pair<double, cv::Mat>> pending_depths;
 
     bool EOD = false;
 };

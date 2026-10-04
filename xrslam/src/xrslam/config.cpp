@@ -4,7 +4,53 @@ namespace xrslam {
 
 Config::~Config() = default;
 
+SensorMode Config::sensor_mode() const { return SensorMode::MONOCULAR_IMU; }
+
+CameraModel Config::camera_model() const { return CameraModel::PINHOLE; }
+
+bool Config::has_imu() const {
+    const SensorMode mode = sensor_mode();
+    return mode == SensorMode::MONOCULAR_IMU || mode == SensorMode::RGBD_IMU;
+}
+
+bool Config::has_depth() const {
+    const SensorMode mode = sensor_mode();
+    return mode == SensorMode::RGBD || mode == SensorMode::RGBD_IMU;
+}
+
+TrajectoryAlignment Config::trajectory_alignment() const {
+    // Monocular visual-only has no metric scale. RGB-D and all IMU modes are
+    // evaluated metrically.
+    return sensor_mode() == SensorMode::MONOCULAR
+               ? TrajectoryAlignment::SIM3
+               : TrajectoryAlignment::SE3;
+}
+
 vector<4> Config::camera_distortion() const { return vector<4>::Zero(); }
+
+quaternion Config::imu_to_body_rotation() const {
+    return quaternion::Identity();
+}
+
+vector<3> Config::imu_to_body_translation() const {
+    return vector<3>::Zero();
+}
+
+matrix<3> Config::gyroscope_noise_cov() const {
+    return matrix<3>::Identity();
+}
+
+matrix<3> Config::accelerometer_noise_cov() const {
+    return matrix<3>::Identity();
+}
+
+matrix<3> Config::gyroscope_bias_noise_cov() const {
+    return matrix<3>::Identity();
+}
+
+matrix<3> Config::accelerometer_bias_noise_cov() const {
+    return matrix<3>::Identity();
+}
 
 quaternion Config::output_to_body_rotation() const {
     return quaternion::Identity();
@@ -80,6 +126,15 @@ size_t Config::sliding_window_tracker_frequent() const { return 1; }
 void Config::log_config() const {
     std::stringstream ss;
     ss << std::scientific << std::boolalpha << std::setprecision(5);
+
+    ss << "Config::sensor_mode: " << static_cast<int>(sensor_mode())
+       << std::endl;
+    ss << "Config::has_imu: " << has_imu() << std::endl;
+    ss << "Config::has_depth: " << has_depth() << std::endl;
+    ss << "Config::camera_model: " << static_cast<int>(camera_model())
+       << std::endl;
+    ss << "Config::trajectory_alignment: "
+       << static_cast<int>(trajectory_alignment()) << std::endl;
 
     ss << "Config::camera_intrinsic:\n"
        << camera_intrinsic() << "\n"

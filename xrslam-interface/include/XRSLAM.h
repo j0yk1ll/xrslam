@@ -54,9 +54,13 @@ typedef struct XRSLAMImage {
  * @brief input depth image data
  */
 typedef struct XRSLAMDepthImage {
-    uint16_t *data;       /*!< the warped depth data. */
-    uint16_t *confidence; /*!< the warped confidence. */
-    double timeStamp;     /*!<  timestamp in second. */
+    uint16_t *data;       /*!< registered depth samples. */
+    uint16_t *confidence; /*!< optional confidence, may be NULL. */
+    double timeStamp;     /*!< timestamp in second. */
+    int width;            /*!< depth width in pixels. */
+    int height;           /*!< depth height in pixels. */
+    int stride;           /*!< row stride in bytes. */
+    double scale;         /*!< meters per integer depth unit. */
 } XRSLAMDepthImage;
 
 /**
@@ -201,6 +205,12 @@ typedef struct XRSLAMStringOutput {
 int XRSLAMCreate(const char *slam_config_path, const char *device_config_path,
                  const char *license_path, const char *product_name,
                  void **config);
+
+/**
+ * @brief return whether the active configuration requires IMU input.
+ * @return 1 when IMU is required, otherwise 0.
+ */
+int XRSLAMRequiresIMU(void *config);
 
 /**
  * @brief push sensor data to SLAM system

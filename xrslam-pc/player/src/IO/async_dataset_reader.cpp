@@ -59,6 +59,15 @@ std::pair<double, cv::Mat> AsyncDatasetReader::read_image() {
     return r;
 }
 
+std::pair<double, cv::Mat> AsyncDatasetReader::read_depth() {
+    std::lock_guard lock(reader_mutex);
+    if (pending_depths.empty())
+        return {};
+    auto r = pending_depths.front();
+    pending_depths.pop();
+    return r;
+}
+
 std::pair<double, XRSLAMGyroscope> AsyncDatasetReader::read_gyroscope() {
     std::lock_guard lock(reader_mutex);
     auto r = pending_gyroscopes.front();
@@ -93,6 +102,7 @@ void AsyncDatasetReader::reader_loop() {
         switch (next_type) {
         case DatasetReader::CAMERA: {
             pending_images.emplace(reader->read_image());
+            pending_depths.emplace(reader->read_depth());
         } break;
         case DatasetReader::GYROSCOPE: {
             pending_gyroscopes.emplace(reader->read_gyroscope());

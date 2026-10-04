@@ -21,8 +21,13 @@ SlidingWindowTracker::SlidingWindowTracker(std::unique_ptr<Map> keyframe_map,
     for (size_t j = 1; j < map->frame_num(); ++j) {
         Frame *frame_i = map->get_frame(j - 1);
         Frame *frame_j = map->get_frame(j);
-        frame_j->preintegration.integrate(frame_j->image->t, frame_i->motion.bg,
-                                          frame_i->motion.ba, true, true);
+        if (config->has_imu()) {
+            frame_j->preintegration.integrate(frame_j->image->t,
+                                              frame_i->motion.bg,
+                                              frame_i->motion.ba, true, true);
+        } else {
+            frame_j->tag(FT_FIX_MOTION) = true;
+        }
     }
 }
 
@@ -73,10 +78,16 @@ void SlidingWindowTracker::mirror_frame(Map *feature_tracking_map,
         return track->tag(TT_TRASH) && !track->tag(TT_STATIC);
     });
 
-    new_frame_j->preintegration.integrate(new_frame_j->image->t,
-                                          new_frame_i->motion.bg,
-                                          new_frame_i->motion.ba, true, true);
-    new_frame_j->preintegration.predict(new_frame_i, new_frame_j);
+    if (config->has_imu()) {
+        new_frame_j->preintegration.integrate(new_frame_j->image->t,
+                                              new_frame_i->motion.bg,
+                                              new_frame_i->motion.ba, true, true);
+        new_frame_j->preintegration.predict(new_frame_i, new_frame_j);
+    } else {
+        new_frame_j->pose = new_frame_i->pose;
+        new_frame_j->motion = new_frame_i->motion;
+        new_frame_j->tag(FT_FIX_MOTION) = true;
+    }
 }
 
 bool SlidingWindowTracker::track() {
@@ -127,8 +138,10 @@ void SlidingWindowTracker::localize_newframe() {
 
     solver->add_frame_states(frame_j);
 
-    solver->put_factor(Solver::create_preintegration_prior_factor(
-        frame_i, frame_j, frame_j->preintegration));
+    if (config->has_imu()) {
+        solver->put_factor(Solver::create_preintegration_prior_factor(
+            frame_i, frame_j, frame_j->preintegration));
+    }
 
     for (size_t k = 0; k < frame_j->keypoint_num(); ++k) {
         if (Track *track = frame_j->get_track(k)) {
@@ -295,28 +308,30 @@ void SlidingWindowTracker::refine_window() {
         }
     }
 
-    for (size_t j = 1; j < map->frame_num(); ++j) {
-        Frame *frame_i = map->get_frame(j - 1);
-        Frame *frame_j = map->get_frame(j);
+    if (config->has_imu()) {
+        for (size_t j = 1; j < map->frame_num(); ++j) {
+            Frame *frame_i = map->get_frame(j - 1);
+            Frame *frame_j = map->get_frame(j);
 
-        frame_j->keyframe_preintegration = frame_j->preintegration;
-        if (!frame_i->subframes.empty()) {
-            std::vector<ImuData> imu_data;
-            for (size_t k = 0; k < frame_i->subframes.size(); ++k) {
-                auto &sub_imu_data = frame_i->subframes[k]->preintegration.data;
-                imu_data.insert(imu_data.end(), sub_imu_data.begin(),
-                                sub_imu_data.end());
+            frame_j->keyframe_preintegration = frame_j->preintegration;
+            if (!frame_i->subframes.empty()) {
+                std::vector<ImuData> imu_data;
+                for (size_t k = 0; k < frame_i->subframes.size(); ++k) {
+                    auto &sub_imu_data = frame_i->subframes[k]->preintegration.data;
+                    imu_data.insert(imu_data.end(), sub_imu_data.begin(),
+                                    sub_imu_data.end());
+                }
+                frame_j->keyframe_preintegration.data.insert(
+                    frame_j->keyframe_preintegration.data.begin(),
+                    imu_data.begin(), imu_data.end());
             }
-            frame_j->keyframe_preintegration.data.insert(
-                frame_j->keyframe_preintegration.data.begin(), imu_data.begin(),
-                imu_data.end());
-        }
 
-        if (frame_j->keyframe_preintegration.integrate(
-                frame_j->image->t, frame_i->motion.bg, frame_i->motion.ba, true,
-                true)) {
-            solver->put_factor(Solver::create_preintegration_error_factor(
-                frame_i, frame_j, frame_j->keyframe_preintegration));
+            if (frame_j->keyframe_preintegration.integrate(
+                    frame_j->image->t, frame_i->motion.bg, frame_i->motion.ba,
+                    true, true)) {
+                solver->put_factor(Solver::create_preintegration_error_factor(
+                    frame_i, frame_j, frame_j->keyframe_preintegration));
+            }
         }
     }
 
@@ -400,11 +415,13 @@ void SlidingWindowTracker::refine_subwindow() {
             solver->add_frame_states(subframe);
             Frame *prev_frame =
                 (i == 0 ? frame : frame->subframes[i - 1].get());
-            subframe->preintegration.integrate(
-                subframe->image->t, prev_frame->motion.bg,
-                prev_frame->motion.ba, true, true);
-            solver->put_factor(Solver::create_preintegration_error_factor(
-                prev_frame, subframe, subframe->preintegration));
+            if (config->has_imu()) {
+                subframe->preintegration.integrate(
+                    subframe->image->t, prev_frame->motion.bg,
+                    prev_frame->motion.ba, true, true);
+                solver->put_factor(Solver::create_preintegration_error_factor(
+                    prev_frame, subframe, subframe->preintegration));
+            }
         }
 
         Frame *last_subframe = frame->subframes.back().get();
@@ -437,11 +454,13 @@ void SlidingWindowTracker::refine_subwindow() {
             solver->add_frame_states(subframe);
             Frame *prev_frame =
                 (i == 0 ? frame : frame->subframes[i - 1].get());
-            subframe->preintegration.integrate(
-                subframe->image->t, prev_frame->motion.bg,
-                prev_frame->motion.ba, true, true);
-            solver->put_factor(Solver::create_preintegration_error_factor(
-                prev_frame, subframe, subframe->preintegration));
+            if (config->has_imu()) {
+                subframe->preintegration.integrate(
+                    subframe->image->t, prev_frame->motion.bg,
+                    prev_frame->motion.ba, true, true);
+                solver->put_factor(Solver::create_preintegration_error_factor(
+                    prev_frame, subframe, subframe->preintegration));
+            }
             for (size_t k = 0; k < subframe->keypoint_num(); ++k) {
                 if (Track *track = subframe->get_track(k)) {
                     if (track->all_tagged(TT_VALID, TT_TRIANGULATED,
@@ -452,7 +471,7 @@ void SlidingWindowTracker::refine_subwindow() {
                                     subframe, track));
                         } else if (track->first_frame()->id() > frame->id()) {
                             solver->add_factor(
-                                frame->reprojection_error_factors[k].get());
+                                subframe->reprojection_error_factors[k].get());
                         }
                     }
                 }

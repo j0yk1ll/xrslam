@@ -23,6 +23,7 @@ std::unique_ptr<Frame> Frame::clone() const {
     frame->K = K;
     frame->sqrt_inv_cov = sqrt_inv_cov;
     frame->image = image;
+    frame->use_depth = use_depth;
     frame->pose = pose;
     frame->motion = motion;
     frame->camera = camera;
@@ -48,6 +49,19 @@ Track *Frame::get_track(size_t keypoint_index, Map *allocation_map) {
     if (tracks[keypoint_index] == nullptr) {
         Track *track = allocation_map->create_track();
         track->add_keypoint(this, keypoint_index);
+        if (use_depth && image && image->has_depth()) {
+            const vector<3> &bearing = bearings[keypoint_index];
+            const double z = image->depth(apply_k(bearing, K));
+            if (std::isfinite(z) && z > 0.0 && bearing.z() > 1.0e-6) {
+                // Landmark inverse depth is inverse range along the unit
+                // bearing, while RGB-D convention is optical-axis z depth.
+                track->landmark.inv_depth = bearing.z() / z;
+                track->tag(TT_VALID) = true;
+                track->tag(TT_TRIANGULATED) = true;
+                track->tag(TT_STATIC) = true;
+                track->tag(TT_FIX_INVD) = true;
+            }
+        }
     }
     return tracks[keypoint_index];
 }
@@ -79,7 +93,7 @@ void Frame::track_keypoints(Frame *next_frame, Config *config) {
         curr_keypoints[i] = apply_k(bearings[i], K);
     }
 
-    if (config->feature_tracker_predict_keypoints()) {
+    if (config->has_imu() && config->feature_tracker_predict_keypoints()) {
         quaternion delta_key_q =
             (camera.q_cs.conjugate() * imu.q_cs *
              next_frame->preintegration.delta.q *

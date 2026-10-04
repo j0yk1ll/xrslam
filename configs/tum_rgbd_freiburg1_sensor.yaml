@@ -1,0 +1,25 @@
+%YAML:1.0
+cam0:
+  T_BS:
+    cols: 4
+    rows: 4
+    data: [1.0, 0.0, 0.0, 0.0,
+           0.0, 1.0, 0.0, 0.0,
+           0.0, 0.0, 1.0, 0.0,
+           0.0, 0.0, 0.0, 1.0]
+  resolution: [640, 480]
+  camera_model: pinhole
+  distortion_model: radtan
+  # TUM recommends the ROS-default intrinsics without undistortion for the
+  # pre-registered RGB/depth PNG streams, preserving pixel correspondence.
+  # This is intentional for Freiburg1 despite its separate raw RGB calibration.
+  intrinsics: [525.0, 525.0, 319.5, 239.5]
+  camera_distortion_flag: 0
+  distortion: [0.0, 0.0, 0.0, 0.0]
+  camera_readout_time: 0.0
+  time_offset: 0.0
+  extrinsic:
+    q_bc: [0.0, 0.0, 0.0, 1.0]
+    p_bc: [0.0, 0.0, 0.0]
+  noise: [0.5, 0.0,
+          0.0, 0.5]

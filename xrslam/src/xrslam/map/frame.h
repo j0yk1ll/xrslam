@@ -63,6 +63,7 @@ class Frame : public Tagged<FrameTag>, public Identifiable<Frame> {
     matrix<3> K;
     matrix<2> sqrt_inv_cov;
     std::shared_ptr<Image> image;
+    bool use_depth = false;
 
     PoseState pose;
     MotionState motion;

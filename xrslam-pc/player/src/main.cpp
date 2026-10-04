@@ -99,6 +99,7 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Cannot open \"%s\"\n", data_path.c_str());
         return EXIT_FAILURE;
     }
+    const bool requires_imu = XRSLAMRequiresIMU(yaml_config) != 0;
 
     bool has_gyroscope = false, has_accelerometer = false;
     outputs.emplace_back(std::make_unique<ConsoleTrajectoryWriter>());
@@ -106,6 +107,14 @@ int main(int argc, char *argv[]) {
 
     viewer = std::make_shared<Viewer>("XRSLAM PC", 1280, 720);
     viewer->start();
+    if (isRunning) {
+        {
+            std::lock_guard<std::mutex> lock(viewer->_notifier->mtx);
+            viewer->_notifier->ready = true;
+        }
+        viewer->_notifier->cv.notify_one();
+    }
+
 
     std::unique_ptr<xrslam::InspectPainter> feature_tracker_painter;
     feature_tracker_painter = std::make_unique<OpenCvPainter>(feature_tracker_cvimage);
@@ -130,13 +139,26 @@ int main(int argc, char *argv[]) {
         } break;
         case DatasetReader::CAMERA: {
 
-            {
+            if (!isRunning) {
                 auto &notifier = viewer->_notifier;
                 std::unique_lock<std::mutex> lock(viewer->_notifier->mtx);
                 notifier->cv.wait(lock, [&notifier] { return notifier->ready;});
             }
 
             auto [t, img] = reader->read_image();
+            auto [depth_t, depth] = reader->read_depth();
+            if (!depth.empty()) {
+                XRSLAMDepthImage depth_image;
+                depth_image.data = depth.ptr<uint16_t>();
+                depth_image.confidence = nullptr;
+                depth_image.timeStamp = depth_t;
+                depth_image.width = depth.cols;
+                depth_image.height = depth.rows;
+                depth_image.stride = (int)depth.step[0];
+                depth_image.scale = 1.0 / 5000.0;
+                XRSLAMPushSensorData(XRSLAM_SENSOR_DEPTH_CAMERA, &depth_image);
+            }
+
             XRSLAMImage image;
             image.camera_id = 0;
             image.timeStamp = t;
@@ -145,7 +167,7 @@ int main(int argc, char *argv[]) {
             image.channel = img.channels();
             image.stride = img.step[0];
             XRSLAMPushSensorData(XRSLAM_SENSOR_CAMERA, &image);
-            if (has_accelerometer && has_gyroscope) {
+            if (!requires_imu || (has_accelerometer && has_gyroscope)) {
                 XRSLAMRunOneFrame();
                 XRSLAMState state;
                 XRSLAMGetResult(XRSLAM_RESULT_STATE, &state);

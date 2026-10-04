@@ -45,6 +45,9 @@ const Config *XRSLAM::Detail::configurations() const { return config.get(); }
 
 Pose XRSLAM::Detail::track_gyroscope(const double &t, const double &x,
                                      const double &y, const double &z) {
+    if (!config->has_imu())
+        return predict_pose(t);
+
     if (accelerometers.size() > 0) {
         if (t < accelerometers.front().t) {
             gyroscopes.clear();
@@ -71,6 +74,9 @@ Pose XRSLAM::Detail::track_gyroscope(const double &t, const double &x,
 
 Pose XRSLAM::Detail::track_accelerometer(const double &t, const double &x,
                                          const double &y, const double &z) {
+    if (!config->has_imu())
+        return predict_pose(t);
+
     if (gyroscopes.size() > 0 && t >= gyroscopes.front().t) {
         if (t > gyroscopes.back().t) {
             while (gyroscopes.size() > 1) {
@@ -101,22 +107,34 @@ Pose XRSLAM::Detail::track_accelerometer(const double &t, const double &x,
 }
 
 Pose XRSLAM::Detail::track_camera(std::shared_ptr<Image> image) {
+    runtime_assert(!config->has_depth() || image->has_depth(),
+                   "RGB-D mode requires a depth-bearing Image");
+
     std::unique_ptr<Frame> frame = std::make_unique<Frame>();
     frame->K = config->camera_intrinsic();
     frame->image = image;
+    frame->use_depth = config->has_depth();
     frame->sqrt_inv_cov = frame->K.block<2, 2>(0, 0);
     frame->sqrt_inv_cov(0, 0) /= ::sqrt(config->keypoint_noise_cov()(0, 0));
     frame->sqrt_inv_cov(1, 1) /= ::sqrt(config->keypoint_noise_cov()(1, 1));
     frame->camera.q_cs = config->camera_to_body_rotation();
     frame->camera.p_cs = config->camera_to_body_translation();
-    frame->imu.q_cs = config->imu_to_body_rotation();
-    frame->imu.p_cs = config->imu_to_body_translation();
-    frame->preintegration.cov_a = config->accelerometer_noise_cov();
-    frame->preintegration.cov_w = config->gyroscope_noise_cov();
-    frame->preintegration.cov_ba = config->accelerometer_bias_noise_cov();
-    frame->preintegration.cov_bg = config->gyroscope_bias_noise_cov();
+    if (config->has_imu()) {
+        frame->imu.q_cs = config->imu_to_body_rotation();
+        frame->imu.p_cs = config->imu_to_body_translation();
+        frame->preintegration.cov_a = config->accelerometer_noise_cov();
+        frame->preintegration.cov_w = config->gyroscope_noise_cov();
+        frame->preintegration.cov_ba = config->accelerometer_bias_noise_cov();
+        frame->preintegration.cov_bg = config->gyroscope_bias_noise_cov();
+    } else {
+        frame->imu = frame->camera;
+        frame->tag(FT_FIX_MOTION) = true;
+    }
 
-    frames.emplace_back(std::move(frame));
+    if (config->has_imu())
+        frames.emplace_back(std::move(frame));
+    else
+        feature_tracker->track_frame(std::move(frame));
 
     Pose outpose = predict_pose(image->t);
     std::unique_lock<std::mutex> lk(latest_mutex_);
@@ -128,6 +146,9 @@ Pose XRSLAM::Detail::track_camera(std::shared_ptr<Image> image) {
 }
 
 void XRSLAM::Detail::track_imu(const ImuData &imu) {
+    if (!config->has_imu())
+        return;
+
     frontal_imus.emplace_back(imu);
     imus.emplace_back(imu);
     while (imus.size() > 0 && frames.size() > 0) {
@@ -150,13 +171,16 @@ Pose XRSLAM::Detail::predict_pose(const double &t) {
         }
         // std::cout << "delay: " << t - state_time << std::endl;
 
-        while (!frontal_imus.empty() && frontal_imus.front().t <= state_time) {
-            frontal_imus.pop_front();
-        }
-        for (const auto &imu : frontal_imus) {
-            if (imu.t <= t) {
-                propagate_state(state_time, state_pose, state_motion, imu.t,
-                                imu.w, imu.a);
+        if (config->has_imu()) {
+            while (!frontal_imus.empty() &&
+                   frontal_imus.front().t <= state_time) {
+                frontal_imus.pop_front();
+            }
+            for (const auto &imu : frontal_imus) {
+                if (imu.t <= t) {
+                    propagate_state(state_time, state_pose, state_motion, imu.t,
+                                    imu.w, imu.a);
+                }
             }
         }
         output_pose.q = state_pose.q * config->output_to_body_rotation();

@@ -9,9 +9,27 @@ The following is the parameter description of the PC configuration, include [sla
 * `q_bo`: the rotation part of extrinsics from output to body in quaternion, (x y z w)
 * `p_bo`: the translation part of extrinsics from output to body, (x y z)
 
+# Sensor modality
+
+The SLAM config accepts `sensor.mode` with one of:
+
+* `monocular` - RGB only, visual-only, scale unobservable
+* `monocular_imu` - RGB + IMU, metric
+* `rgbd` - registered RGB-D, metric
+* `rgbd_imu` - registered RGB-D + IMU, metric
+
+IMU calibration is mandatory only when the selected mode contains IMU.
+Depth is expressed in meters and registered to the RGB image. The core `Image`
+API exposes optional `has_depth()` / `depth(pixel)` accessors so a learned-depth
+provider can implement the same interface later without changing the SLAM API.
+
+Trajectory evaluation must use Sim(3) alignment for `monocular` and SE(3)
+alignment for all metric modes.
+
 ### camera
 
 * `intrinsic`: the intrinsics of camera (fx fy cx cy)
+* `camera_model`: `pinhole` or `fisheye` (`equidistant` is accepted as an alias)
 * `camera_distortion_flag`: use distortion model or not
 * `distortion`: the distortion coefficient of camera, (k1 k2 p1 p2)
 * `time_offset`: camera time delay wrt. IMU [s]

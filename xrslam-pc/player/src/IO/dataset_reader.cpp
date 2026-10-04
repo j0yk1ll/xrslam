@@ -1,6 +1,7 @@
 #include <dataset_reader.h>
 #include <euroc_dataset_reader.h>
 #include <tum_dataset_reader.h>
+#include <tum_rgbd_dataset_reader.h>
 #include <async_dataset_reader.h>
 #include <optional>
 
@@ -23,6 +24,9 @@ DatasetReader::create_reader(const std::string &filename, void *yaml_config,
             std::make_unique<EurocDatasetReader>(path.value(), yaml_config);
     } else if (auto path = path_from_scheme(filename, "tum://")) {
         reader = std::make_unique<TUMDatasetReader>(path.value(), yaml_config);
+    } else if (auto path = path_from_scheme(filename, "tum-rgbd://")) {
+        reader =
+            std::make_unique<TUMRGBDDatasetReader>(path.value(), yaml_config);
     } else {
         return nullptr;
     }

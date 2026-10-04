@@ -131,8 +131,30 @@ void XRSLAMManager::PushImage(XRSLAMImage *image) {
         opencv_image->raw = img.clone();
 
         std::lock_guard<std::mutex> lck(input_mutex_);
+        if (!pending_depth_.empty() &&
+            std::abs(pending_depth_timestamp_ - image->timeStamp) < 1.0e-6 &&
+            pending_depth_.cols == cols && pending_depth_.rows == rows) {
+            opencv_image->depth_image = pending_depth_;
+        }
+        pending_depth_.release();
+        pending_depth_timestamp_ = -1.0;
         cur_image_ = std::shared_ptr<xrslam::Image>(opencv_image);
     }
+}
+
+void XRSLAMManager::PushDepth(XRSLAMDepthImage *depth) {
+    if (!depth || !depth->data || depth->width <= 0 || depth->height <= 0 ||
+        depth->stride <= 0 || depth->scale <= 0.0)
+        return;
+
+    cv::Mat raw(depth->height, depth->width, CV_16UC1, depth->data,
+                (size_t)depth->stride);
+    cv::Mat meters;
+    raw.convertTo(meters, CV_32FC1, depth->scale);
+
+    std::lock_guard<std::mutex> lck(input_mutex_);
+    pending_depth_ = meters;
+    pending_depth_timestamp_ = depth->timeStamp;
 }
 
 void XRSLAMManager::PushAcceleration(XRSLAMAcceleration *acc) {

@@ -68,9 +68,32 @@ struct OutputObject {
     int isolated;
 };
 
+enum class SensorMode {
+    MONOCULAR,
+    MONOCULAR_IMU,
+    RGBD,
+    RGBD_IMU,
+};
+
+enum class CameraModel {
+    PINHOLE,
+    FISHEYE,
+};
+
+enum class TrajectoryAlignment {
+    SE3,
+    SIM3,
+};
+
 class Config {
   public:
     virtual ~Config();
+
+    virtual SensorMode sensor_mode() const;
+    virtual CameraModel camera_model() const;
+    bool has_imu() const;
+    bool has_depth() const;
+    TrajectoryAlignment trajectory_alignment() const;
 
     virtual vector<2> camera_resolution() const = 0;
     virtual matrix<3> camera_intrinsic() const = 0;
@@ -79,14 +102,14 @@ class Config {
     virtual vector<3> camera_to_body_translation() const = 0;
     virtual size_t camera_distortion_flag() const = 0;
     virtual double camera_time_offset() const = 0;
-    virtual quaternion imu_to_body_rotation() const = 0;
-    virtual vector<3> imu_to_body_translation() const = 0;
+    virtual quaternion imu_to_body_rotation() const;
+    virtual vector<3> imu_to_body_translation() const;
 
     virtual matrix<2> keypoint_noise_cov() const = 0;
-    virtual matrix<3> gyroscope_noise_cov() const = 0;
-    virtual matrix<3> accelerometer_noise_cov() const = 0;
-    virtual matrix<3> gyroscope_bias_noise_cov() const = 0;
-    virtual matrix<3> accelerometer_bias_noise_cov() const = 0;
+    virtual matrix<3> gyroscope_noise_cov() const;
+    virtual matrix<3> accelerometer_noise_cov() const;
+    virtual matrix<3> gyroscope_bias_noise_cov() const;
+    virtual matrix<3> accelerometer_bias_noise_cov() const;
 
     virtual quaternion output_to_body_rotation() const;
     virtual vector<3> output_to_body_translation() const;
@@ -147,6 +170,11 @@ class Image {
     virtual double evaluate(const vector<2> &u, int level = 0) const = 0;
     virtual double evaluate(const vector<2> &u, vector<2> &ddu,
                             int level = 0) const = 0;
+
+    // Depth is in meters and registered to this image. Implementations that
+    // do not provide depth keep the defaults below.
+    virtual bool has_depth() const { return false; }
+    virtual double depth(const vector<2> &u) const { return 0.0; }
 
     virtual ~Image() = default;
     virtual void preprocess(double clipLimit, int width, int height) {}

@@ -1,6 +1,7 @@
 #ifndef XRSLAM_EXTRA_OPENCV_IMAGE_H
 #define XRSLAM_EXTRA_OPENCV_IMAGE_H
 
+#include <cmath>
 #include <ceres/cubic_interpolation.h>
 #include <opencv2/opencv.hpp>
 #include <xrslam/xrslam.h>
@@ -23,6 +24,17 @@ class OpenCvImage : public Image {
     double evaluate(const vector<2> &u, vector<2> &ddu,
                     int level = 0) const override;
 
+    bool has_depth() const override { return !depth_image.empty(); }
+    double depth(const vector<2> &u) const override {
+        if (depth_image.empty())
+            return 0.0;
+        const int x = (int)std::lround(u.x());
+        const int y = (int)std::lround(u.y());
+        if (x < 0 || y < 0 || x >= depth_image.cols || y >= depth_image.rows)
+            return 0.0;
+        return (double)depth_image.at<float>(y, x);
+    }
+
     void detect_keypoints(std::vector<vector<2>> &keypoints,
                           size_t max_points = 1000,
                           double keypoint_distance = 10) const override;
@@ -38,6 +50,7 @@ class OpenCvImage : public Image {
 
     cv::Mat image;
     cv::Mat raw;
+    cv::Mat depth_image; // CV_32FC1 meters, registered to image pixels
 
   private:
     std::vector<cv::Mat> image_pyramid;

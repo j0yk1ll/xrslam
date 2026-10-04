@@ -61,6 +61,32 @@ static void assign(double &value, const YAML::Node &node) {
     value = node.as<double>();
 }
 
+static SensorMode parse_sensor_mode(const YAML::Node &node) {
+    if (!node.IsScalar())
+        throw YamlConfig::TypeErrorException(node.Tag());
+    const std::string mode = node.as<std::string>();
+    if (mode == "monocular" || mode == "rgb")
+        return SensorMode::MONOCULAR;
+    if (mode == "monocular_imu" || mode == "rgb_imu")
+        return SensorMode::MONOCULAR_IMU;
+    if (mode == "rgbd")
+        return SensorMode::RGBD;
+    if (mode == "rgbd_imu")
+        return SensorMode::RGBD_IMU;
+    throw YamlConfig::ParseException("unsupported sensor.mode: " + mode);
+}
+
+static CameraModel parse_camera_model(const YAML::Node &node) {
+    if (!node.IsScalar())
+        throw YamlConfig::TypeErrorException(node.Tag());
+    const std::string model = node.as<std::string>();
+    if (model == "pinhole")
+        return CameraModel::PINHOLE;
+    if (model == "fisheye" || model == "equidistant")
+        return CameraModel::FISHEYE;
+    throw YamlConfig::ParseException("unsupported cam0.camera_model: " + model);
+}
+
 template <typename V>
 static void assign_vector(V &vec, const YAML::Node &node) {
     require_vector(node, vec.size());
@@ -81,6 +107,8 @@ static void assign_matrix(M &mat, const YAML::Node &node) {
 
 YamlConfig::YamlConfig(const std::string &slam_config_filename,
                        const std::string &device_config_filename) {
+    m_sensor_mode = Config::sensor_mode();
+    m_camera_model = Config::camera_model();
     m_output_to_body_rotation = Config::output_to_body_rotation();
     m_output_to_body_translation = Config::output_to_body_translation();
     m_sliding_window_size = Config::sliding_window_size();
@@ -149,6 +177,14 @@ YamlConfig::YamlConfig(const std::string &slam_config_filename,
         throw LoadException(device_config_filename);
     }
 
+    if (auto node = find_node(slam_config, "sensor.mode", false)) {
+        m_sensor_mode = parse_sensor_mode(node);
+    }
+
+    if (auto node = find_node(device_config, "cam0.camera_model", false)) {
+        m_camera_model = parse_camera_model(node);
+    }
+
     if (auto intrinsic = find_node(device_config, "cam0.intrinsics", true)) {
         require_vector(intrinsic, 4);
         m_camera_intrinsic.setIdentity();
@@ -187,28 +223,32 @@ YamlConfig::YamlConfig(const std::string &slam_config_filename,
         assign_matrix(m_keypoint_noise_cov, node);
     }
 
-    if (auto node = find_node(device_config, "imu.extrinsic.q_bi", true)) {
-        assign_vector(m_imu_to_body_rotation.coeffs(), node);
-    }
+    m_imu_to_body_rotation = Config::imu_to_body_rotation();
+    m_imu_to_body_translation = Config::imu_to_body_translation();
+    m_gyroscope_noise_cov = Config::gyroscope_noise_cov();
+    m_accelerometer_noise_cov = Config::accelerometer_noise_cov();
+    m_gyroscope_bias_noise_cov = Config::gyroscope_bias_noise_cov();
+    m_accelerometer_bias_noise_cov = Config::accelerometer_bias_noise_cov();
 
-    if (auto node = find_node(device_config, "imu.extrinsic.p_bi", true)) {
-        assign_vector(m_imu_to_body_translation, node);
-    }
-
-    if (auto node = find_node(device_config, "imu.noise.cov_g", true)) {
-        assign_matrix(m_gyroscope_noise_cov, node);
-    }
-
-    if (auto node = find_node(device_config, "imu.noise.cov_a", true)) {
-        assign_matrix(m_accelerometer_noise_cov, node);
-    }
-
-    if (auto node = find_node(device_config, "imu.noise.cov_bg", true)) {
-        assign_matrix(m_gyroscope_bias_noise_cov, node);
-    }
-
-    if (auto node = find_node(device_config, "imu.noise.cov_ba", true)) {
-        assign_matrix(m_accelerometer_bias_noise_cov, node);
+    if (has_imu()) {
+        if (auto node = find_node(device_config, "imu.extrinsic.q_bi", true)) {
+            assign_vector(m_imu_to_body_rotation.coeffs(), node);
+        }
+        if (auto node = find_node(device_config, "imu.extrinsic.p_bi", true)) {
+            assign_vector(m_imu_to_body_translation, node);
+        }
+        if (auto node = find_node(device_config, "imu.noise.cov_g", true)) {
+            assign_matrix(m_gyroscope_noise_cov, node);
+        }
+        if (auto node = find_node(device_config, "imu.noise.cov_a", true)) {
+            assign_matrix(m_accelerometer_noise_cov, node);
+        }
+        if (auto node = find_node(device_config, "imu.noise.cov_bg", true)) {
+            assign_matrix(m_gyroscope_bias_noise_cov, node);
+        }
+        if (auto node = find_node(device_config, "imu.noise.cov_ba", true)) {
+            assign_matrix(m_accelerometer_bias_noise_cov, node);
+        }
     }
 
     if (auto node = find_node(slam_config, "output.q_bo", false)) {
@@ -363,6 +403,10 @@ YamlConfig::YamlConfig(const std::string &slam_config_filename,
 }
 
 YamlConfig::~YamlConfig() = default;
+
+SensorMode YamlConfig::sensor_mode() const { return m_sensor_mode; }
+
+CameraModel YamlConfig::camera_model() const { return m_camera_model; }
 
 matrix<3> YamlConfig::camera_intrinsic() const { return m_camera_intrinsic; }
 

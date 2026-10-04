@@ -10,6 +10,7 @@
 #include <liteviz/core/viewport.h>
 #include <filesystem>
 #include <opencv2/opencv.hpp>
+#include <atomic>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -230,7 +231,8 @@ class Viewer: public ViewerDetail {
 
     std::thread renderThread;
     std::shared_ptr<VisConfig> visConfig;
-    std::shared_ptr<VisData> visData; 
+    std::shared_ptr<VisData> visData;
+    std::atomic<bool> resourcesReady{false};
 
 public:
     Viewer(std::string title, int width, int height):
@@ -268,6 +270,7 @@ public:
         configRenderer->setNotifier(_notifier.get());
         configRenderer->setData(visData.get());
 
+        resourcesReady.store(true, std::memory_order_release);
         return true;
     }
 
@@ -284,6 +287,9 @@ public:
     }
 
     VisData* data() {
+        while (!resourcesReady.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
         return visData.get();
     }
 };

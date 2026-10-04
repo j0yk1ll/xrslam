@@ -1,0 +1,12 @@
+sensor:
+  mode: monocular
+
+# Keep the rest of the front-end/back-end tuning shared with the VIO config.
+initializer:
+  refine_imu: false
+
+solver:
+  iteration_limit: 10
+
+visual_localization:
+  enable: false

@@ -1,3 +1,15 @@
+# Alignment policy
+
+Evaluation alignment follows sensor observability:
+
+* monocular visual-only: Sim(3), because absolute scale is unobservable;
+* RGB + IMU: SE(3);
+* RGB-D: SE(3);
+* RGB-D + IMU: SE(3).
+
+Use `tools/evaluate_trajectory.sh` rather than selecting evo alignment flags
+per benchmark by hand.
+
 # Run EuRoC
 
 <div align='center'><img src="../../images/PC-Player-Start.png" width="60%" height="100%"></div>
@@ -35,7 +47,10 @@ evo_traj euroc data.csv --save_as_tum
 After converting the ground truth trajectory to the "tum" format,  you can evaluate the accuracy by
 
 ```bash
-evo_ape tum data.tum $PROJECT/trajectory.tum -a
+tools/evaluate_trajectory.sh monocular_imu data.tum $PROJECT/trajectory.tum
 ```
+
+For a monocular visual-only run, pass `monocular`; the wrapper adds scale
+correction and therefore performs Sim(3) rather than SE(3) alignment.
 
 You will get the RMSE of XRSLAM on MH_01 sequence, in which APE is 0.109.

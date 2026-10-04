@@ -17,6 +17,12 @@ int XRSLAMCreate(
     return 1;
 }
 
+int XRSLAMRequiresIMU(void *config) {
+    if (!config)
+        return 0;
+    return static_cast<xrslam::extra::YamlConfig *>(config)->has_imu() ? 1 : 0;
+}
+
 void XRSLAMPushSensorData(XRSLAMSensorType sensor_type, // sensor type
                           void *sensor_data             // sensor data
 ) {
@@ -34,6 +40,9 @@ void XRSLAMPushSensorData(XRSLAMSensorType sensor_type, // sensor type
             static_cast<XRSLAMGyroscope *>(sensor_data));
         break;
     case XRSLAM_SENSOR_DEPTH_CAMERA:
+        xrslam::XRSLAMManager::Instance().PushDepth(
+            static_cast<XRSLAMDepthImage *>(sensor_data));
+        break;
     case XRSLAM_SENSOR_GRAVITY:
     case XRSLAM_SENSOR_ROTATION_VECTOR:
     case XRSLAM_SENSOR_UNKNOWN:

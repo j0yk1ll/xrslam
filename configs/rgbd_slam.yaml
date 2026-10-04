@@ -1,0 +1,10 @@
+sensor:
+  mode: rgbd
+
+initializer:
+  refine_imu: false
+
+solver:
+  iteration_limit: 10
+
+# Depth is expected in meters and registered to cam0 RGB pixels.

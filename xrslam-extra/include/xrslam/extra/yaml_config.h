@@ -31,6 +31,9 @@ class YamlConfig : public Config {
                const std::string &device_config_filename);
     ~YamlConfig();
 
+    SensorMode sensor_mode() const override;
+    CameraModel camera_model() const override;
+
     vector<2> camera_resolution() const override;
     matrix<3> camera_intrinsic() const override;
     vector<4> camera_distortion() const override;
@@ -89,6 +92,9 @@ class YamlConfig : public Config {
     double rotation_ransac_threshold() const override;
 
   private:
+    SensorMode m_sensor_mode;
+    CameraModel m_camera_model;
+
     vector<2> m_camera_resolution;
     matrix<3> m_camera_intrinsic;
     vector<4> m_camera_distortion;

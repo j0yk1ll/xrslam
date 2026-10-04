@@ -83,6 +83,14 @@ std::unique_ptr<SlidingWindowTracker> Initializer::initialize() {
     if (!init_imu())
         return nullptr;
 
+    if (!config->has_imu()) {
+        for (size_t i = 0; i < map->frame_num(); ++i) {
+            Frame *frame = map->get_frame(i);
+            frame->motion = MotionState{};
+            frame->tag(FT_FIX_MOTION) = true;
+        }
+    }
+
     map->get_frame(0)->tag(FT_FIX_POSE) = true;
 
     auto solver = Solver::create();
@@ -117,14 +125,16 @@ std::unique_ptr<SlidingWindowTracker> Initializer::initialize() {
             solver->add_factor(frame->reprojection_error_factors[j].get());
         }
     }
-    for (size_t j = 1; j < map->frame_num(); ++j) {
-        Frame *frame_i = map->get_frame(j - 1);
-        Frame *frame_j = map->get_frame(j);
-        if (frame_j->preintegration.integrate(frame_j->image->t,
-                                              frame_i->motion.bg,
-                                              frame_i->motion.ba, true, true)) {
-            solver->put_factor(Solver::create_preintegration_error_factor(
-                frame_i, frame_j, frame_j->preintegration));
+    if (config->has_imu()) {
+        for (size_t j = 1; j < map->frame_num(); ++j) {
+            Frame *frame_i = map->get_frame(j - 1);
+            Frame *frame_j = map->get_frame(j);
+            if (frame_j->preintegration.integrate(frame_j->image->t,
+                                                  frame_i->motion.bg,
+                                                  frame_i->motion.ba, true, true)) {
+                solver->put_factor(Solver::create_preintegration_error_factor(
+                    frame_i, frame_j, frame_j->preintegration));
+            }
         }
     }
     solver->solve();
@@ -335,6 +345,28 @@ bool Initializer::init_sfm() {
 
     // [3] sfm
 
+    // Monocular visual-only reconstruction has an arbitrary global scale.
+    // Fix one well-conditioned inverse-depth landmark so bundle adjustment
+    // does not retain a scale nullspace or drive all depths toward infinity.
+    // Keep the anchor tag on the track so subsequent visual-only solves retain
+    // the same scale gauge while that landmark remains in the map.
+    if (!config->has_imu() && !config->has_depth()) {
+        Track *scale_anchor = nullptr;
+        double scale_anchor_inv_depth = 0.0;
+        for (size_t i = 0; i < map->track_num(); ++i) {
+            Track *track = map->get_track(i);
+            if (!track || !track->all_tagged(TT_VALID, TT_TRIANGULATED))
+                continue;
+            if (track->landmark.inv_depth > scale_anchor_inv_depth) {
+                scale_anchor = track;
+                scale_anchor_inv_depth = track->landmark.inv_depth;
+            }
+        }
+        if (!scale_anchor || scale_anchor_inv_depth <= 1e-6)
+            return false;
+        scale_anchor->tag(TT_FIX_INVD) = true;
+    }
+
     // [3.1] bundle adjustment
     map->get_frame(0)->tag(FT_FIX_POSE) = true;
     auto solver = Solver::create();
@@ -383,6 +415,13 @@ bool Initializer::init_sfm() {
 }
 
 bool Initializer::init_imu() {
+    if (!config->has_imu()) {
+        reset_states();
+        // Preserve the arbitrary SfM scale. Scale remains intentionally
+        // unobservable in monocular visual-only mode.
+        return true;
+    }
+
     reset_states();
     solve_gyro_bias();
     solve_gravity_scale_velocity();
