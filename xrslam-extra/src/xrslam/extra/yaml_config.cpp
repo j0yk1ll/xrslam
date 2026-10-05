@@ -139,6 +139,10 @@ YamlConfig::YamlConfig(const std::string &slam_config_filename,
     m_initializer_refine_imu = Config::initializer_refine_imu();
     m_solver_iteration_limit = Config::solver_iteration_limit();
     m_solver_time_limit = Config::solver_time_limit();
+    m_depth_sensor_metric_relative_sigma =
+        Config::depth_sensor_metric_relative_sigma();
+    m_depth_monocular_metric_relative_sigma =
+        Config::depth_monocular_metric_relative_sigma();
 
     m_parsac_flag = Config::parsac_flag();
     m_parsac_dynamic_probability = Config::parsac_dynamic_probability();
@@ -369,6 +373,19 @@ YamlConfig::YamlConfig(const std::string &slam_config_filename,
         assign(m_solver_time_limit, node);
     }
 
+    if (auto node =
+            find_node(slam_config, "depth.sensor_metric_relative_sigma", false)) {
+        assign(m_depth_sensor_metric_relative_sigma, node);
+    } else if (auto node =
+                   find_node(slam_config, "depth.relative_sigma", false)) {
+        assign(m_depth_sensor_metric_relative_sigma, node);
+    }
+
+    if (auto node = find_node(
+            slam_config, "depth.monocular_metric_relative_sigma", false)) {
+        assign(m_depth_monocular_metric_relative_sigma, node);
+    }
+
     if (auto node = find_node(slam_config, "parsac.parsac_flag", false)) {
         assign(m_parsac_flag, node);
     }
@@ -555,6 +572,14 @@ size_t YamlConfig::solver_iteration_limit() const {
 }
 
 double YamlConfig::solver_time_limit() const { return m_solver_time_limit; }
+
+double YamlConfig::depth_sensor_metric_relative_sigma() const {
+    return m_depth_sensor_metric_relative_sigma;
+}
+
+double YamlConfig::depth_monocular_metric_relative_sigma() const {
+    return m_depth_monocular_metric_relative_sigma;
+}
 
 bool YamlConfig::parsac_flag() const { return m_parsac_flag; }
 

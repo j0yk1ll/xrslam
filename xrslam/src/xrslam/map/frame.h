@@ -50,8 +50,15 @@ class Frame : public Tagged<FrameTag>, public Identifiable<Frame> {
 
     Track *get_track(size_t keypoint_index, Map *allocation_map);
 
-    void detect_keypoints(Config *config);
+    void detect_keypoints(
+        Config *config, bool recovery_anchor = false);
     void track_keypoints(Frame *next_frame, Config *config);
+
+    // Learned wide-baseline recovery is intentionally separate from ordinary
+    // temporal tracking. These methods are no-ops with the default backend.
+    void cache_local_features();
+    bool has_cached_local_features();
+    size_t recover_keypoints(Frame *reference_frame, Config *config);
 
     PoseState get_pose(const ExtrinsicParams &sensor) const;
     void set_pose(const ExtrinsicParams &sensor, const PoseState &pose);

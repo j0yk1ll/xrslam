@@ -105,6 +105,10 @@ size_t Config::solver_iteration_limit() const { return 10; }
 
 double Config::solver_time_limit() const { return 1.0e6; }
 
+double Config::depth_sensor_metric_relative_sigma() const { return 0.35; }
+
+double Config::depth_monocular_metric_relative_sigma() const { return 1.00; }
+
 double Config::rotation_misalignment_threshold() const { return 0.1; }
 
 double Config::rotation_ransac_threshold() const { return 10; }
@@ -254,6 +258,12 @@ void Config::log_config() const {
        << std::endl;
 
     ss << "Config::solver_time_limit: " << solver_time_limit() << std::endl;
+
+    ss << "Config::depth_sensor_metric_relative_sigma: "
+       << depth_sensor_metric_relative_sigma() << std::endl;
+
+    ss << "Config::depth_monocular_metric_relative_sigma: "
+       << depth_monocular_metric_relative_sigma() << std::endl;
 
     ss << "Config::parsac_flag: " << parsac_flag() << std::endl;
 

@@ -5,6 +5,7 @@
 #include <xrslam/estimation/solver.h>
 #include <xrslam/geometry/stereo.h>
 #include <xrslam/inspection.h>
+#include <xrslam/local_feature_backend.h>
 #include <xrslam/localizer/localizer.h>
 #include <xrslam/map/frame.h>
 #include <xrslam/map/map.h>
@@ -101,10 +102,44 @@ void FeatureTracker::work(std::unique_lock<std::mutex> &l) {
                 frame->motion = last_frame->motion;
                 frame->tag(FT_FIX_MOTION) = true;
             }
+            // Recovery may need the current metric camera prediction to
+            // project synchronized landmarks. Preintegration has already been
+            // integrated above; predicting here is algebraically identical to
+            // the previous post-tracking call and does not use feature tracks.
+            if (is_initialized && config->has_imu())
+                frame->preintegration.predict(last_frame, frame.get());
+
             last_frame->track_keypoints(frame.get(), config.get());
+
             if (is_initialized) {
-                if (config->has_imu())
-                    frame->preintegration.predict(last_frame, frame.get());
+                // Preserve cheap high-rate KLT. Learned matching is only
+                // considered when fewer than half of the normal feature
+                // budget survived. Reference/current descriptors are
+                // extracted lazily only after this trigger fires.
+                size_t recovery_trigger =
+                    config->feature_tracker_max_keypoint_detection() / 2;
+                if (recovery_trigger == 0)
+                    recovery_trigger = 1;
+
+                if (frame->keypoint_num() < recovery_trigger &&
+                    map->frame_num() >= 10) {
+                    size_t reference_index = map->frame_num() - 10;
+                    while (true) {
+                        Frame *reference_frame =
+                            map->get_frame(reference_index);
+                        if (reference_frame->image->width() > 0 &&
+                            reference_frame->image->height() > 0) {
+                            frame->recover_keypoints(reference_frame,
+                                                     config.get());
+                            break;
+                        }
+                        if (reference_index == 0)
+                            break;
+                        --reference_index;
+                    }
+                }
+            }
+            if (is_initialized) {
 #if defined(XRSLAM_IOS)
                 synchronized(keymap) {
                     attach_latest_frame(frame.get());
@@ -135,11 +170,24 @@ void FeatureTracker::work(std::unique_lock<std::mutex> &l) {
                 lk.unlock();
 #endif
             }
-            last_frame->image->release_image_buffer();
+            const size_t recovery_anchor_stride =
+                local_feature_backend()->recovery_anchor_stride();
+            const bool keep_recovery_anchor =
+                recovery_anchor_stride > 0 &&
+                last_frame->id() % recovery_anchor_stride == 0;
+            if (!keep_recovery_anchor)
+                last_frame->image->release_image_buffer();
         }
 
-        if (slidind_window_frame_tag)
-            frame->detect_keypoints(config.get());
+        if (slidind_window_frame_tag) {
+            const size_t anchor_stride =
+                local_feature_backend()->recovery_anchor_stride();
+            const bool recovery_anchor =
+                is_initialized && anchor_stride > 0 &&
+                frame->id() % anchor_stride == 0;
+            frame->detect_keypoints(
+                config.get(), recovery_anchor);
+        }
         map->attach_frame(std::move(frame));
 
         size_t max_frame_num = is_initialized? config->feature_tracker_max_frames(): config->feature_tracker_max_init_frames();

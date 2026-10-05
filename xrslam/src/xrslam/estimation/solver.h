@@ -42,6 +42,13 @@ class Solver {
     virtual void add_frame_states(Frame *frame, bool with_motion = true);
     virtual void add_track_states(Track *track);
 
+    // Recovery-only visual observation with a fixed world landmark. The
+    // residual uses the same bearing-tangent whitening and robust loss as
+    // XRSLAM's ordinary reprojection factors.
+    virtual void add_learned_world_reprojection(
+        Frame *frame, const vector<3> &landmark_world,
+        const vector<2> &observation_pixel);
+
     virtual void add_factor(ReprojectionErrorFactor *rpecost);
     virtual void add_factor(ReprojectionPriorFactor *rppcost);
     virtual void add_factor(RotationPriorFactor *ropcost);

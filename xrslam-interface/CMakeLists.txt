@@ -26,6 +26,12 @@ target_link_libraries(xrslam
     xrslam-extra-opencv-image
     xrslam-extra-yaml-config
 )
+
+if(TARGET xrslam-extra-xfeat)
+  target_link_libraries(xrslam PUBLIC xrslam-extra-xfeat)
+  target_compile_definitions(xrslam PRIVATE XRSLAM_HAS_XFEAT_ONNX=1)
+endif()
+
 target_include_directories(xrslam
   PUBLIC
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_PREFIX}/include>

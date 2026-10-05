@@ -34,6 +34,7 @@ class SlidingWindowTracker {
                             std::vector<char> &mask,
                             std::vector<size_t> &pts_to_index);
     void update_track_status();
+    void synchronize_feature_tracking_landmarks();
 
     std::vector<vector<3>> m_P3D;
     std::vector<vector<2>> m_P2D;

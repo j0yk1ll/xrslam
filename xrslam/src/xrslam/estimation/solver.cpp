@@ -7,9 +7,90 @@
 #include <xrslam/estimation/ceres/rotation_factor.h>
 #include <xrslam/estimation/solver.h>
 #include <xrslam/estimation/state.h>
+#include <xrslam/geometry/lie_algebra.h>
+#include <xrslam/geometry/stereo.h>
 #include <xrslam/map/frame.h>
+#include <algorithm>
+#include <cmath>
+#include <unordered_set>
 
 namespace xrslam {
+
+namespace {
+
+struct CeresLearnedWorldReprojectionCost {
+    CeresLearnedWorldReprojectionCost(
+        Frame *frame, const vector<3> &landmark_world,
+        const vector<2> &observation_pixel)
+        : landmark_world(landmark_world),
+          camera(frame->camera),
+          sqrt_inv_cov(frame->sqrt_inv_cov) {
+        const vector<3> observation_bearing =
+            remove_k(observation_pixel, frame->K);
+        local_tangent.leftCols<2>() =
+            s2_tangential_basis(observation_bearing);
+        local_tangent.rightCols<1>() = observation_bearing;
+    }
+
+    template <typename T>
+    bool operator()(const T *const q_center_data,
+                    const T *const p_center_data,
+                    T *residuals) const {
+        Eigen::Map<const Eigen::Quaternion<T>> q_center(
+            q_center_data);
+        Eigen::Map<const Eigen::Matrix<T, 3, 1>> p_center(
+            p_center_data);
+
+        const Eigen::Matrix<T, 3, 1> point_world =
+            landmark_world.template cast<T>();
+        const Eigen::Matrix<T, 3, 1> point_center =
+            q_center.conjugate() * (point_world - p_center);
+
+        const Eigen::Quaternion<T> q_cs =
+            camera.q_cs.template cast<T>();
+        const Eigen::Matrix<T, 3, 1> p_cs =
+            camera.p_cs.template cast<T>();
+        const Eigen::Matrix<T, 3, 1> point_camera =
+            q_cs.conjugate() * (point_center - p_cs);
+
+        const Eigen::Matrix<T, 3, 1> local =
+            local_tangent.template cast<T>().transpose() *
+            point_camera;
+        Eigen::Matrix<T, 2, 1> residual =
+            local.template head<2>() / local.z();
+        residual = sqrt_inv_cov.template cast<T>() * residual;
+
+        residuals[0] = residual.x();
+        residuals[1] = residual.y();
+        return true;
+    }
+
+    vector<3> landmark_world;
+    ExtrinsicParams camera;
+    matrix<2> sqrt_inv_cov;
+    matrix<3> local_tangent;
+};
+
+class CeresDepthPriorFactor final : public ceres::SizedCostFunction<1, 1> {
+  public:
+    CeresDepthPriorFactor(double inv_depth, double sqrt_info)
+        : inv_depth(inv_depth), sqrt_info(sqrt_info) {}
+
+    bool Evaluate(double const *const *parameters, double *residuals,
+                  double **jacobians) const override {
+        residuals[0] = sqrt_info * (parameters[0][0] - inv_depth);
+        if (jacobians && jacobians[0]) {
+            jacobians[0][0] = sqrt_info;
+        }
+        return true;
+    }
+
+  private:
+    double inv_depth;
+    double sqrt_info;
+};
+
+} // namespace
 
 struct Solver::SolverDetails {
     static Config *&config() {
@@ -18,6 +99,7 @@ struct Solver::SolverDetails {
     }
     std::unique_ptr<ceres::Problem> problem;
     std::unique_ptr<ceres::LossFunction> cauchy_loss;
+    std::unique_ptr<ceres::LossFunction> learned_recovery_loss;
     std::unique_ptr<ceres::LocalParameterization> quaternion_parameterization;
     std::vector<std::unique_ptr<ReprojectionErrorFactor>> managed_rpefactors;
     std::vector<std::unique_ptr<ReprojectionPriorFactor>> managed_rppfactors;
@@ -25,6 +107,10 @@ struct Solver::SolverDetails {
     std::vector<std::unique_ptr<PreIntegrationErrorFactor>> managed_piefactors;
     std::vector<std::unique_ptr<PreIntegrationPriorFactor>> managed_pipfactors;
     std::vector<std::unique_ptr<MarginalizationFactor>> managed_marfactors;
+    std::vector<std::unique_ptr<ceres::CostFunction>> managed_depth_factors;
+    std::vector<std::unique_ptr<ceres::CostFunction>>
+        managed_learned_recovery_factors;
+    std::unordered_set<Track *> depth_prior_tracks;
 };
 
 Solver::Solver() : details(std::make_unique<SolverDetails>()) {
@@ -36,6 +122,13 @@ Solver::Solver() : details(std::make_unique<SolverDetails>()) {
     details->problem = std::make_unique<ceres::Problem>(problem_options);
     details->cauchy_loss = std::make_unique<ceres::CauchyLoss>(
         1.0); // TODO(jinyu): make configurable
+
+    // Recovery observations can arrive several pixels away from the normal
+    // VIO basin. Use the same principled scale as the learned PnP/reprojection
+    // gate instead of the tighter ordinary-track Cauchy scale.
+    details->learned_recovery_loss =
+        std::make_unique<ceres::CauchyLoss>(2.448);
+
     details->quaternion_parameterization =
         std::make_unique<QuaternionParameterization>();
 }
@@ -114,7 +207,47 @@ void Solver::add_track_states(Track *track) {
     if (track->tag(TT_FIX_INVD)) {
         details->problem->SetParameterBlockConstant(
             &(track->landmark.inv_depth));
+        return;
     }
+
+    if (track->has_depth_prior &&
+        details->depth_prior_tracks.insert(track).second) {
+        double relative_sigma =
+            details->config()->depth_sensor_metric_relative_sigma();
+        if (track->depth_prior_source == DepthSource::MONOCULAR_METRIC) {
+            relative_sigma =
+                details->config()->depth_monocular_metric_relative_sigma();
+        }
+        relative_sigma = std::max(relative_sigma, 1.0e-6);
+        const double sigma_inv_depth =
+            std::max(relative_sigma * std::abs(track->depth_prior_inv_depth),
+                     1.0e-3);
+        const double confidence =
+            std::max(0.0, std::min(1.0, track->depth_prior_confidence));
+        const double sqrt_info = std::sqrt(confidence) / sigma_inv_depth;
+        auto factor = std::make_unique<CeresDepthPriorFactor>(
+            track->depth_prior_inv_depth, sqrt_info);
+        details->problem->AddResidualBlock(
+            factor.get(), details->cauchy_loss.get(),
+            &(track->landmark.inv_depth));
+        details->managed_depth_factors.emplace_back(std::move(factor));
+    }
+}
+
+void Solver::add_learned_world_reprojection(
+    Frame *frame, const vector<3> &landmark_world,
+    const vector<2> &observation_pixel) {
+    auto factor =
+        std::make_unique<ceres::AutoDiffCostFunction<
+            CeresLearnedWorldReprojectionCost, 2, 4, 3>>(
+            new CeresLearnedWorldReprojectionCost(
+                frame, landmark_world, observation_pixel));
+
+    details->problem->AddResidualBlock(
+        factor.get(), details->learned_recovery_loss.get(),
+        frame->pose.q.coeffs().data(), frame->pose.p.data());
+    details->managed_learned_recovery_factors.emplace_back(
+        std::move(factor));
 }
 
 void Solver::add_factor(ReprojectionErrorFactor *rpefactor) {

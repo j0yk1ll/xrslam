@@ -51,6 +51,7 @@ class XRSLAMManager {
     std::shared_ptr<xrslam::Image> cur_image_;
     cv::Mat pending_depth_;
     double pending_depth_timestamp_ = -1.0;
+    DepthSource pending_depth_source_ = DepthSource::SENSOR_METRIC;
 };
 } // namespace xrslam
 #endif

@@ -13,6 +13,7 @@ class TUMRGBDDatasetReader : public DatasetReader {
     void get_image_resolution(int &width, int &height) override;
     std::pair<double, cv::Mat> read_image() override;
     std::pair<double, cv::Mat> read_depth() override;
+    double depth_scale() const override { return 1.0 / 5000.0; }
     std::pair<double, XRSLAMGyroscope> read_gyroscope() override;
     std::pair<double, XRSLAMAcceleration> read_accelerometer() override;
 

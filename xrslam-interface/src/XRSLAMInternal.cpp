@@ -1,5 +1,13 @@
 #include "XRSLAMManager.h"
 #include "xrslam/xrslam.h"
+#include "xrslam/local_feature_backend.h"
+
+#include <cstdlib>
+#include <cstdio>
+
+#ifdef XRSLAM_HAS_XFEAT_ONNX
+#include <xrslam/extra/xfeat_local_feature_backend.h>
+#endif
 
 int XRSLAMCreate(
     const char *slam_config_path,   // slam configuration file path
@@ -12,6 +20,30 @@ int XRSLAMCreate(
     std::shared_ptr<xrslam::extra::YamlConfig> yaml_config =
         std::make_shared<xrslam::extra::YamlConfig>(slam_config_path,
                                                     device_config_path);
+
+    // Always start from the behavior-preserving image-backed detector added in
+    // 0034. XFeat is opt-in for experiments via XRSLAM_XFEAT_MODEL.
+    xrslam::set_local_feature_backend(nullptr);
+    if (const char *xfeat_model = std::getenv("XRSLAM_XFEAT_MODEL");
+        xfeat_model && xfeat_model[0] != '\0') {
+#ifdef XRSLAM_HAS_XFEAT_ONNX
+        try {
+            xrslam::set_local_feature_backend(
+                xrslam::extra::make_xfeat_local_feature_backend(xfeat_model));
+            std::fprintf(stderr, "[XFeat] detector enabled: %s\n", xfeat_model);
+        } catch (const std::exception &e) {
+            std::fprintf(stderr, "[XFeat] failed to initialize: %s\n", e.what());
+            return 0;
+        }
+#else
+        std::fprintf(
+            stderr,
+            "[XFeat] XRSLAM_XFEAT_MODEL was set, but this build has no "
+            "ONNX Runtime support.\n");
+        return 0;
+#endif
+    }
+
     xrslam::XRSLAMManager::Instance().Init(yaml_config);
     *config = static_cast<void *>(yaml_config.get());
     return 1;

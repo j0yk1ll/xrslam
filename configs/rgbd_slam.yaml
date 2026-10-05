@@ -7,4 +7,10 @@ initializer:
 solver:
   iteration_limit: 10
 
+depth:
+  # Physical RGB-D / metric sensor depth.
+  sensor_metric_relative_sigma: 0.35
+  # Monocular metric predictions (e.g. DepthART) are trusted less strongly.
+  monocular_metric_relative_sigma: 2.00
+
 # Depth is expected in meters and registered to cam0 RGB pixels.

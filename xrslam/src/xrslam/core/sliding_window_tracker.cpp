@@ -2,6 +2,8 @@
 #include <xrslam/core/detail.h>
 #include <xrslam/core/feature_tracker.h>
 #include <xrslam/core/frontend_worker.h>
+#include <xrslam/core/recovery_learned_map.h>
+#include <xrslam/core/recovery_pose_cache.h>
 #include <xrslam/core/sliding_window_tracker.h>
 #include <xrslam/estimation/solver.h>
 #include <xrslam/geometry/lie_algebra.h>
@@ -13,7 +15,64 @@
 #include <xrslam/map/track.h>
 #include <xrslam/utility/unique_timer.h>
 
+#include <cstdlib>
+
 namespace xrslam {
+
+namespace {
+
+bool learned_recovery_shadow_enabled() {
+    const char *value = std::getenv(
+        "XRSLAM_LEARNED_RECOVERY_SHADOW");
+    return value && std::string(value) == "1";
+}
+
+double recovery_observation_rmse_px(
+    const Frame *frame,
+    const RecoveryLearnedObservationSet &observations) {
+    if (!frame || observations.landmarks_world.empty() ||
+        observations.landmarks_world.size() !=
+            observations.observations_pixel.size()) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+
+    const PoseState camera_pose = frame->get_pose(frame->camera);
+    double squared_error = 0.0;
+    size_t count = 0;
+    for (size_t i = 0;
+         i < observations.landmarks_world.size(); ++i) {
+        const vector<3> point_camera =
+            camera_pose.q.conjugate() *
+            (observations.landmarks_world[i] - camera_pose.p);
+        if (!point_camera.allFinite() ||
+            point_camera.z() <= 1.0e-6) {
+            continue;
+        }
+        const vector<2> projected =
+            apply_k(point_camera, frame->K);
+        const double error =
+            (projected - observations.observations_pixel[i]).norm();
+        squared_error += error * error;
+        ++count;
+    }
+
+    if (count == 0)
+        return std::numeric_limits<double>::quiet_NaN();
+    return std::sqrt(
+        squared_error / static_cast<double>(count));
+}
+
+double camera_rotation_delta_deg(
+    const PoseState &a, const PoseState &b) {
+    const matrix<3> R_delta =
+        a.q.conjugate().matrix() * b.q.matrix();
+    const double cosine = std::max(
+        -1.0,
+        std::min(1.0, (R_delta.trace() - 1.0) * 0.5));
+    return std::acos(cosine) * 180.0 / M_PI;
+}
+
+} // namespace
 
 SlidingWindowTracker::SlidingWindowTracker(std::unique_ptr<Map> keyframe_map,
                                            std::shared_ptr<Config> config)
@@ -108,6 +167,8 @@ bool SlidingWindowTracker::track() {
         refine_subwindow();
     }
 
+    synchronize_feature_tracking_landmarks();
+
     inspect_debug(sliding_window_landmarks, landmarks) {
         std::vector<Landmark> points;
         points.reserve(map->track_num());
@@ -127,15 +188,167 @@ bool SlidingWindowTracker::track() {
     return true;
 }
 
-void SlidingWindowTracker::localize_newframe() {
-    auto solver = Solver::create();
+void SlidingWindowTracker::synchronize_feature_tracking_landmarks() {
+    if (!feature_tracking_map)
+        return;
 
+    size_t source_landmarks = 0;
+    size_t synchronized_landmarks = 0;
+    size_t missing_feature_track = 0;
+    size_t synchronized_poses = 0;
+
+    synchronized(feature_tracking_map) {
+        // Preserve optimized camera poses for SWT keyframes AND subframes.
+        // Recovery support anchors are indexed by high-rate Frame ID, so only
+        // caching top-level keyframes would miss many reference-10/reference-20
+        // support frames.
+        const auto cache_source_pose =
+            [&](Frame *source_frame) {
+                if (!source_frame)
+                    return;
+
+                const size_t feature_frame_index =
+                    feature_tracking_map->frame_index_by_id(
+                        source_frame->id());
+                if (feature_frame_index == nil())
+                    return;
+
+                set_recovery_camera_pose_world(
+                    source_frame->id(),
+                    source_frame->get_pose(source_frame->camera));
+                ++synchronized_poses;
+            };
+
+        for (size_t frame_index = 0;
+             frame_index < map->frame_num(); ++frame_index) {
+            Frame *source_frame = map->get_frame(frame_index);
+            cache_source_pose(source_frame);
+            if (!source_frame)
+                continue;
+
+            for (const auto &subframe : source_frame->subframes)
+                cache_source_pose(subframe.get());
+        }
+
+        // Learned recovery maps are intentionally not materialized here.
+        // 0060 builds only recovery-relevant anchors on demand in
+        // Frame::recover_keypoints(), using optimized +/-10 support poses
+        // already captured in recovery_pose_cache.
+
+        // The cache is a snapshot of the current optimized window. Never let
+        // marginalized/rejected landmarks survive indefinitely in the
+        // high-rate feature map.
+        for (size_t track_index = 0;
+             track_index < feature_tracking_map->track_num();
+             ++track_index) {
+            if (Track *feature_track =
+                    feature_tracking_map->get_track(track_index)) {
+                feature_track->recovery_landmark_world.reset();
+            }
+        }
+
+        for (size_t track_index = 0;
+             track_index < map->track_num(); ++track_index) {
+            Track *source_track = map->get_track(track_index);
+            if (!source_track ||
+                source_track->tag(TT_TRASH) ||
+                !source_track->all_tagged(
+                    TT_VALID, TT_TRIANGULATED, TT_STATIC)) {
+                continue;
+            }
+
+            ++source_landmarks;
+            const vector<3> landmark =
+                source_track->get_landmark_point();
+
+            Track *feature_track = nullptr;
+
+            // Mirrored SWT frames preserve frame ids and keypoint indices.
+            // Find the newest observation that still exists in the high-rate
+            // feature-tracking map, then recover the persistent FT Track
+            // through that exact observation.
+            for (auto it =
+                     source_track->keypoint_map().rbegin();
+                 it != source_track->keypoint_map().rend();
+                 ++it) {
+                Frame *source_frame = it->first;
+                const size_t keypoint_index = it->second;
+
+                const size_t feature_frame_index =
+                    feature_tracking_map->frame_index_by_id(
+                        source_frame->id());
+                if (feature_frame_index == nil())
+                    continue;
+
+                Frame *feature_frame =
+                    feature_tracking_map->get_frame(
+                        feature_frame_index);
+                if (!feature_frame ||
+                    keypoint_index >=
+                        feature_frame->keypoint_num()) {
+                    continue;
+                }
+
+                Track *candidate =
+                    feature_frame->get_track(keypoint_index);
+                if (!candidate ||
+                    candidate->tag(TT_TRASH)) {
+                    continue;
+                }
+
+                feature_track = candidate;
+                break;
+            }
+
+            if (!feature_track) {
+                ++missing_feature_track;
+                continue;
+            }
+
+            // Exact recovery-only world point. Do not mutate inverse depth
+            // or estimator tags in the feature-tracking map.
+            feature_track->recovery_landmark_world = landmark;
+            ++synchronized_landmarks;
+        }
+    }
+
+    static size_t sync_diag_count = 0;
+    ++sync_diag_count;
+    if (sync_diag_count == 1 ||
+        sync_diag_count % 100 == 0 ||
+        (source_landmarks > 0 &&
+         synchronized_landmarks == 0)) {
+        std::fprintf(
+            stderr,
+            "[LandmarkSync] calls=%zu poses=%zu source=%zu "
+            "synchronized=%zu missing=%zu\n",
+            sync_diag_count, synchronized_poses,
+            source_landmarks, synchronized_landmarks,
+            missing_feature_track);
+    }
+}
+
+
+void SlidingWindowTracker::localize_newframe() {
     Frame *frame_i = map->get_frame(map->frame_num() - 2);
     if (!frame_i->subframes.empty()) {
         frame_i = frame_i->subframes.back().get();
     }
     Frame *frame_j = map->get_frame(map->frame_num() - 1);
 
+    const std::optional<RecoveryLearnedObservationSet>
+        learned_observations =
+            get_recovery_learned_observations(frame_j->id());
+    const bool run_recovery_shadow =
+        learned_recovery_shadow_enabled() &&
+        learned_observations.has_value() &&
+        learned_observations->pnp_pose_valid &&
+        learned_observations->landmarks_world.size() >= 5 &&
+        learned_observations->landmarks_world.size() ==
+            learned_observations->observations_pixel.size();
+
+    // Ordinary XRSLAM localization remains authoritative.
+    auto solver = Solver::create();
     solver->add_frame_states(frame_j);
 
     if (config->has_imu()) {
@@ -143,16 +356,175 @@ void SlidingWindowTracker::localize_newframe() {
             frame_i, frame_j, frame_j->preintegration));
     }
 
+    size_t conventional_priors = 0;
     for (size_t k = 0; k < frame_j->keypoint_num(); ++k) {
         if (Track *track = frame_j->get_track(k)) {
             if (track->all_tagged(TT_VALID, TT_TRIANGULATED, TT_STATIC)) {
                 solver->put_factor(
                     Solver::create_reprojection_prior_factor(frame_j, track));
+                ++conventional_priors;
             }
         }
     }
 
-    solver->solve();
+    const bool authoritative_usable = solver->solve();
+
+    if (run_recovery_shadow) {
+        const PoseState authoritative_pose = frame_j->pose;
+        const MotionState authoritative_motion = frame_j->motion;
+        const PoseState authoritative_camera_pose =
+            frame_j->get_pose(frame_j->camera);
+        const double authoritative_learned_rmse =
+            recovery_observation_rmse_px(
+                frame_j, *learned_observations);
+
+        // Convert the learned PnP camera pose into XRSLAM's body pose.
+        PoseState pnp_body_seed = authoritative_pose;
+        pnp_body_seed.q =
+            learned_observations->pnp_q_wc *
+            frame_j->camera.q_cs.conjugate();
+        pnp_body_seed.q.normalize();
+        pnp_body_seed.p =
+            learned_observations->pnp_p_wc -
+            pnp_body_seed.q * frame_j->camera.p_cs;
+
+        frame_j->pose = pnp_body_seed;
+        frame_j->motion = authoritative_motion;
+
+        const PoseState pnp_seed_camera_pose =
+            frame_j->get_pose(frame_j->camera);
+        const quaternion pnp_seed_q_wc =
+            pnp_seed_camera_pose.q;
+        const vector<3> pnp_seed_p_wc =
+            pnp_seed_camera_pose.p;
+        const double pnp_seed_rmse =
+            recovery_observation_rmse_px(
+                frame_j, *learned_observations);
+
+        // Dedicated recovery localizer:
+        //   - start inside the learned/PnP basin,
+        //   - retain the IMU prior when available,
+        //   - use learned fixed-world observations,
+        //   - deliberately omit conventional visual priors because they are
+        //     the measurements considered unreliable during relocalization.
+        auto recovery_solver = Solver::create();
+        recovery_solver->add_frame_states(frame_j);
+
+        // Do not apply the one-step preintegration prior on the relocalization
+        // frame. That prior encodes continuity from the branch considered
+        // broken and was shown in 0066 to erase the learned global-pose seed.
+        // IMU remains available as a disagreement/acceptance signal and normal
+        // preintegration resumes after a recovery is actually committed.
+        size_t learned_factor_count = 0;
+        for (size_t i = 0;
+             i < learned_observations->landmarks_world.size(); ++i) {
+            recovery_solver->add_learned_world_reprojection(
+                frame_j,
+                learned_observations->landmarks_world[i],
+                learned_observations->observations_pixel[i]);
+            ++learned_factor_count;
+        }
+
+        const bool recovery_usable = recovery_solver->solve();
+
+        const PoseState recovery_camera_pose =
+            frame_j->get_pose(frame_j->camera);
+        const double recovery_learned_rmse =
+            recovery_observation_rmse_px(
+                frame_j, *learned_observations);
+
+        const double seed_delta_authoritative_t =
+            (pnp_seed_camera_pose.p -
+             authoritative_camera_pose.p)
+                .norm();
+        const double seed_delta_authoritative_r =
+            camera_rotation_delta_deg(
+                authoritative_camera_pose,
+                pnp_seed_camera_pose);
+
+        const double recovery_delta_authoritative_t =
+            (recovery_camera_pose.p -
+             authoritative_camera_pose.p)
+                .norm();
+        const double recovery_delta_authoritative_r =
+            camera_rotation_delta_deg(
+                authoritative_camera_pose,
+                recovery_camera_pose);
+
+        const double recovery_delta_pnp_t =
+            (recovery_camera_pose.p -
+             pnp_seed_camera_pose.p)
+                .norm();
+        const double recovery_delta_pnp_r =
+            camera_rotation_delta_deg(
+                pnp_seed_camera_pose,
+                recovery_camera_pose);
+
+        const double recovery_delta_v =
+            (frame_j->motion.v -
+             authoritative_motion.v)
+                .norm();
+
+        const quaternion &q_candidate =
+            recovery_camera_pose.q;
+        const vector<3> &p_candidate =
+            recovery_camera_pose.p;
+
+        // The candidate is diagnostic only. Restore the normal localizer
+        // result before any later frontend/keyframe/marginalization logic.
+        frame_j->pose = authoritative_pose;
+        frame_j->motion = authoritative_motion;
+
+        std::fprintf(
+            stderr,
+            "[LearnedRecovery] shadow current=%zu reference=%zu "
+            "learned=%zu conventional_authoritative=%zu "
+            "pnp_inliers=%zu pnp_ratio=%.3f "
+            "authoritative_usable=%d recovery_usable=%d has_imu=%d "
+            "authoritative_rmse_px=%.3f pnp_seed_rmse_px=%.3f "
+            "recovery_rmse_px=%.3f "
+            "seed_delta_authoritative_t=%.4f "
+            "seed_delta_authoritative_r_deg=%.3f "
+            "recovery_delta_authoritative_t=%.4f "
+            "recovery_delta_authoritative_r_deg=%.3f "
+            "recovery_delta_pnp_t=%.4f "
+            "recovery_delta_pnp_r_deg=%.3f "
+            "recovery_delta_v=%.4f "
+            "pnp_seed_p=(%.9f,%.9f,%.9f) "
+            "pnp_seed_q=(%.9f,%.9f,%.9f,%.9f) "
+            "candidate_p=(%.9f,%.9f,%.9f) "
+            "candidate_q=(%.9f,%.9f,%.9f,%.9f) "
+            "learned_cauchy=2.448 conventional_recovery=0 "
+            "imu_factor_recovery=0 pnp_seed=1 "
+            "authoritative_restored=1\n",
+            frame_j->id(),
+            learned_observations->reference_frame_id,
+            learned_factor_count,
+            conventional_priors,
+            learned_observations->pnp_inliers,
+            learned_observations->pnp_ratio,
+            authoritative_usable ? 1 : 0,
+            recovery_usable ? 1 : 0,
+            config->has_imu() ? 1 : 0,
+            authoritative_learned_rmse,
+            pnp_seed_rmse,
+            recovery_learned_rmse,
+            seed_delta_authoritative_t,
+            seed_delta_authoritative_r,
+            recovery_delta_authoritative_t,
+            recovery_delta_authoritative_r,
+            recovery_delta_pnp_t,
+            recovery_delta_pnp_r,
+            recovery_delta_v,
+            pnp_seed_p_wc.x(), pnp_seed_p_wc.y(), pnp_seed_p_wc.z(),
+            pnp_seed_q_wc.x(), pnp_seed_q_wc.y(),
+            pnp_seed_q_wc.z(), pnp_seed_q_wc.w(),
+            p_candidate.x(), p_candidate.y(), p_candidate.z(),
+            q_candidate.x(), q_candidate.y(),
+            q_candidate.z(), q_candidate.w());
+
+        erase_recovery_learned_observations(frame_j->id());
+    }
 }
 
 bool SlidingWindowTracker::manage_keyframe() {

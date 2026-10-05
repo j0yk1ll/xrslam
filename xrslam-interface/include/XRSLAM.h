@@ -53,14 +53,28 @@ typedef struct XRSLAMImage {
 /**
  * @brief input depth image data
  */
+typedef enum XRSLAMDepthFormat {
+    XRSLAM_DEPTH_UINT16 = 0,
+    XRSLAM_DEPTH_FLOAT32 = 1
+} XRSLAMDepthFormat;
+
+typedef enum XRSLAMDepthSource {
+    XRSLAM_DEPTH_SENSOR_METRIC = 0,
+    XRSLAM_DEPTH_MONOCULAR_METRIC = 1,
+    XRSLAM_DEPTH_MONOCULAR_RELATIVE = 2
+} XRSLAMDepthSource;
+
 typedef struct XRSLAMDepthImage {
-    uint16_t *data;       /*!< registered depth samples. */
+    uint16_t *data;       /*!< uint16 depth samples, if format is UINT16. */
     uint16_t *confidence; /*!< optional confidence, may be NULL. */
     double timeStamp;     /*!< timestamp in second. */
     int width;            /*!< depth width in pixels. */
     int height;           /*!< depth height in pixels. */
     int stride;           /*!< row stride in bytes. */
-    double scale;         /*!< meters per integer depth unit. */
+    double scale;         /*!< meters per uint16 unit; ignored for FLOAT32. */
+    float *data_f32;      /*!< float32 depth in meters, if format is FLOAT32. */
+    XRSLAMDepthFormat format;
+    XRSLAMDepthSource source;
 } XRSLAMDepthImage;
 
 /**

@@ -19,6 +19,10 @@ class DatasetReader {
     virtual void get_image_resolution(int &width, int &height) = 0;
     virtual std::pair<double, cv::Mat> read_image() = 0;
     virtual std::pair<double, cv::Mat> read_depth() { return {}; }
+    virtual double depth_scale() const { return 1.0; }
+    virtual XRSLAMDepthSource depth_source() const {
+        return XRSLAM_DEPTH_SENSOR_METRIC;
+    }
     virtual std::pair<double, XRSLAMGyroscope> read_gyroscope() = 0;
     virtual std::pair<double, XRSLAMAcceleration> read_accelerometer() = 0;
 

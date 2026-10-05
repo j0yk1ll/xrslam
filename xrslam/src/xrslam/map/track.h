@@ -74,6 +74,18 @@ class Track : public Tagged<TrackTag>, public Identifiable<Track> {
     std::unique_lock<std::mutex> lock() const { return map->lock(); }
 
     LandmarkState landmark;
+    bool has_depth_prior = false;
+    double depth_prior_inv_depth = 0.0;
+    double depth_prior_sqrt_info = 0.0;
+    DepthSource depth_prior_source = DepthSource::SENSOR_METRIC;
+    double depth_prior_confidence = 1.0;
+
+    // Recovery-only exact world-space landmark copied from the optimized
+    // sliding-window map. This must not be folded into landmark.inv_depth:
+    // inverse depth is anchored to this Track's first feature-map observation,
+    // whose pose can differ from the optimized sliding-window anchor pose.
+    std::optional<vector<3>> recovery_landmark_world;
+
     size_t m_life = 0;
 
   private:

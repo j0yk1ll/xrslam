@@ -81,6 +81,8 @@ class YamlConfig : public Config {
 
     size_t solver_iteration_limit() const override;
     double solver_time_limit() const override;
+    double depth_sensor_metric_relative_sigma() const override;
+    double depth_monocular_metric_relative_sigma() const override;
 
     bool parsac_flag() const override;
     double parsac_dynamic_probability() const override;
@@ -141,6 +143,8 @@ class YamlConfig : public Config {
 
     size_t m_solver_iteration_limit;
     double m_solver_time_limit;
+    double m_depth_sensor_metric_relative_sigma;
+    double m_depth_monocular_metric_relative_sigma;
 
     bool m_parsac_flag;
     double m_parsac_dynamic_probability;

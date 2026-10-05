@@ -85,6 +85,12 @@ enum class TrajectoryAlignment {
     SIM3,
 };
 
+enum class DepthSource {
+    SENSOR_METRIC,
+    MONOCULAR_METRIC,
+    MONOCULAR_RELATIVE,
+};
+
 class Config {
   public:
     virtual ~Config();
@@ -142,6 +148,8 @@ class Config {
 
     virtual size_t solver_iteration_limit() const;
     virtual double solver_time_limit() const;
+    virtual double depth_sensor_metric_relative_sigma() const;
+    virtual double depth_monocular_metric_relative_sigma() const;
 
     virtual double rotation_misalignment_threshold() const;
     virtual double rotation_ransac_threshold() const;
@@ -175,6 +183,8 @@ class Image {
     // do not provide depth keep the defaults below.
     virtual bool has_depth() const { return false; }
     virtual double depth(const vector<2> &u) const { return 0.0; }
+    virtual DepthSource depth_source() const { return DepthSource::SENSOR_METRIC; }
+    virtual double depth_confidence(const vector<2> &u) const { return 1.0; }
 
     virtual ~Image() = default;
     virtual void preprocess(double clipLimit, int width, int height) {}

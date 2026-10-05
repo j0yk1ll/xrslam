@@ -17,6 +17,7 @@ set(XRSLAM_TEST_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/test)
 
 set(PUBLIC_HEADERS
   ${XRSLAM_INCLUDE_DIR}/xrslam/inspection.h
+  ${XRSLAM_INCLUDE_DIR}/xrslam/local_feature_backend.h
   ${XRSLAM_INCLUDE_DIR}/xrslam/xrslam.h
   ${XRSLAM_BINARY_INCLUDE_DIR}/xrslam/version.h
 )
@@ -74,6 +75,7 @@ set(PRIVATE_HEADERS
 
 set(PRIVATE_SOURCES
   ${XRSLAM_SOURCE_DIR}/xrslam/config.cpp
+  ${XRSLAM_SOURCE_DIR}/xrslam/local_feature_backend.cpp
   ${XRSLAM_SOURCE_DIR}/xrslam/core/detail.cpp
   ${XRSLAM_SOURCE_DIR}/xrslam/core/feature_tracker.cpp
   ${XRSLAM_SOURCE_DIR}/xrslam/core/frontend_worker.cpp

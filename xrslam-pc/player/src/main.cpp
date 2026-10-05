@@ -1,4 +1,5 @@
 #include <argparse.hpp>
+#include <chrono>
 #include <iostream>
 #include <thread>
 #include <mutex>
@@ -104,6 +105,7 @@ int main(int argc, char *argv[]) {
     bool has_gyroscope = false, has_accelerometer = false;
     outputs.emplace_back(std::make_unique<ConsoleTrajectoryWriter>());
     DatasetReader::NextDataType next_type;
+    size_t processed_camera_frames = 0;
 
     viewer = std::make_shared<Viewer>("XRSLAM PC", 1280, 720);
     viewer->start();
@@ -121,6 +123,8 @@ int main(int argc, char *argv[]) {
     inspect_debug(feature_tracker_painter, painter) {
         painter = feature_tracker_painter.get();
     }
+
+    const auto dataset_processing_start = std::chrono::steady_clock::now();
 
     while ((next_type = reader->next()) != DatasetReader::END) {
 
@@ -146,16 +150,29 @@ int main(int argc, char *argv[]) {
             }
 
             auto [t, img] = reader->read_image();
+            ++processed_camera_frames;
             auto [depth_t, depth] = reader->read_depth();
             if (!depth.empty()) {
-                XRSLAMDepthImage depth_image;
-                depth_image.data = depth.ptr<uint16_t>();
+                XRSLAMDepthImage depth_image{};
                 depth_image.confidence = nullptr;
                 depth_image.timeStamp = depth_t;
                 depth_image.width = depth.cols;
                 depth_image.height = depth.rows;
                 depth_image.stride = (int)depth.step[0];
-                depth_image.scale = 1.0 / 5000.0;
+                depth_image.source = reader->depth_source();
+
+                if (depth.type() == CV_32FC1) {
+                    depth_image.data_f32 = depth.ptr<float>();
+                    depth_image.format = XRSLAM_DEPTH_FLOAT32;
+                    depth_image.scale = 1.0;
+                } else if (depth.type() == CV_16UC1) {
+                    depth_image.data = depth.ptr<uint16_t>();
+                    depth_image.format = XRSLAM_DEPTH_UINT16;
+                    depth_image.scale = reader->depth_scale();
+                } else {
+                    break;
+                }
+
                 XRSLAMPushSensorData(XRSLAM_SENSOR_DEPTH_CAMERA, &depth_image);
             }
 
@@ -189,6 +206,21 @@ int main(int argc, char *argv[]) {
         } break;
         }
     }
+
+    const auto dataset_processing_end = std::chrono::steady_clock::now();
+    const double dataset_processing_seconds =
+        std::chrono::duration<double>(dataset_processing_end -
+                                      dataset_processing_start)
+            .count();
+    std::cerr << "[XRSLAM Player] dataset processing complete: "
+              << processed_camera_frames << " camera frames in "
+              << dataset_processing_seconds << " s"
+              << " ("
+              << (processed_camera_frames > 0
+                      ? 1000.0 * dataset_processing_seconds /
+                            processed_camera_frames
+                      : 0.0)
+              << " ms/camera frame)" << std::endl;
 
     while (viewer) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));

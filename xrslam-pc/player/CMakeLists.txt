@@ -18,6 +18,10 @@ add_executable(xrslam-pc-player
   ${CMAKE_CURRENT_SOURCE_DIR}/src/IO/tum_dataset_reader.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/IO/tum_rgbd_dataset_reader.h
   ${CMAKE_CURRENT_SOURCE_DIR}/src/IO/tum_rgbd_dataset_reader.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/IO/npy_depth.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/IO/npy_depth.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/IO/tum_depthart_dataset_reader.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/IO/tum_depthart_dataset_reader.cpp
 )
 
 target_include_directories(xrslam-pc-player
