@@ -2,8 +2,8 @@
 
 TUMDatasetReader::TUMDatasetReader(const std::string &tum_path,
                                    void *yaml_config) {
-    config = std::shared_ptr<xrslam::extra::YamlConfig>(
-        reinterpret_cast<xrslam::extra::YamlConfig *>(yaml_config));
+    config =
+        reinterpret_cast<xrslam::extra::YamlConfig *>(yaml_config);
 
     TUMCameraCsv camera_csv;
     TUMImuCsv imu_csv;

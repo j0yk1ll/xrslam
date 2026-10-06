@@ -14,8 +14,12 @@
 
 std::shared_ptr<Viewer> viewer = nullptr;
 cv::Mat feature_tracker_cvimage;
+bool headless = false;
 
 void GetShowElements() {
+    if (headless) {
+        return;
+    }
 
     XRSLAMIntrinsics intrinsics;
     XRSLAMGetResult(XRSLAM_INFO_INTRINSICS, &intrinsics);
@@ -69,6 +73,10 @@ int main(int argc, char *argv[]) {
         .help("Start playing immediately.")
         .default_value(false)
         .implicit_value(true);
+    program.add_argument("--headless")
+        .help("Disable LiteViz and exit when dataset processing completes.")
+        .default_value(false)
+        .implicit_value(true);
     program.add_argument("input").help("input file");
     program.parse_args(argc, argv);
     std::string data_path = program.get<std::string>("input");
@@ -77,7 +85,8 @@ int main(int argc, char *argv[]) {
     std::string license_path = program.get<std::string>("-lc");
     std::string csv_output = program.get<std::string>("--csv");
     std::string tum_output = program.get<std::string>("--tum");
-    bool isRunning = program.get<bool>("-p");
+    headless = program.get<bool>("--headless");
+    bool isRunning = program.get<bool>("-p") || headless;
 
     // create slam with configuration files
     void *yaml_config = nullptr;
@@ -107,21 +116,25 @@ int main(int argc, char *argv[]) {
     DatasetReader::NextDataType next_type;
     size_t processed_camera_frames = 0;
 
-    viewer = std::make_shared<Viewer>("XRSLAM PC", 1280, 720);
-    viewer->start();
-    if (isRunning) {
-        {
-            std::lock_guard<std::mutex> lock(viewer->_notifier->mtx);
-            viewer->_notifier->ready = true;
+    if (!headless) {
+        viewer = std::make_shared<Viewer>("XRSLAM PC", 1280, 720);
+        viewer->start();
+        if (isRunning) {
+            {
+                std::lock_guard<std::mutex> lock(viewer->_notifier->mtx);
+                viewer->_notifier->ready = true;
+            }
+            viewer->_notifier->cv.notify_one();
         }
-        viewer->_notifier->cv.notify_one();
     }
 
-
     std::unique_ptr<xrslam::InspectPainter> feature_tracker_painter;
-    feature_tracker_painter = std::make_unique<OpenCvPainter>(feature_tracker_cvimage);
-    inspect_debug(feature_tracker_painter, painter) {
-        painter = feature_tracker_painter.get();
+    if (!headless) {
+        feature_tracker_painter =
+            std::make_unique<OpenCvPainter>(feature_tracker_cvimage);
+        inspect_debug(feature_tracker_painter, painter) {
+            painter = feature_tracker_painter.get();
+        }
     }
 
     const auto dataset_processing_start = std::chrono::steady_clock::now();

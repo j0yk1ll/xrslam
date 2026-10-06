@@ -16,7 +16,7 @@ class EurocDatasetReader : public DatasetReader {
     std::pair<double, XRSLAMAcceleration> read_accelerometer() override;
 
   private:
-    std::shared_ptr<xrslam::extra::YamlConfig> config;
+    xrslam::extra::YamlConfig *config = nullptr;
     std::deque<std::pair<double, NextDataType>> all_data;
     std::deque<std::pair<double, XRSLAMGyroscope>> gyroscope_data;
     std::deque<std::pair<double, XRSLAMAcceleration>> accelerometer_data;

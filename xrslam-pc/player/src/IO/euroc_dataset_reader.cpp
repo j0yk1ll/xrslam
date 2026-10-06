@@ -3,8 +3,8 @@
 EurocDatasetReader::EurocDatasetReader(const std::string &euroc_path,
                                        void *yaml_config) {
 
-    config = std::shared_ptr<xrslam::extra::YamlConfig>(
-        reinterpret_cast<xrslam::extra::YamlConfig *>(yaml_config));
+    config =
+        reinterpret_cast<xrslam::extra::YamlConfig *>(yaml_config);
 
     CameraCsv camera_csv;
     ImuCsv imu_csv;
