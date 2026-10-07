@@ -1,6 +1,7 @@
 #include <xrslam/common.h>
 #include <xrslam/core/detail.h>
 #include <xrslam/core/feature_tracker.h>
+#include <xrslam/core/keyframe_archive.h>
 #include <xrslam/core/frontend_worker.h>
 #include <xrslam/core/recovery_learned_map.h>
 #include <xrslam/core/recovery_pose_cache.h>
@@ -149,6 +150,88 @@ void SlidingWindowTracker::mirror_frame(Map *feature_tracking_map,
     }
 }
 
+void SlidingWindowTracker::archive_optimized_keyframes() {
+    const char *value = std::getenv("XRSLAM_KEYFRAME_ARCHIVE_SHADOW");
+    if (!value || std::string(value) != "1")
+        return;
+
+    std::string active_before_slide;
+    for (size_t i = 0; i < map->frame_num(); ++i) {
+        Frame *frame = map->get_frame(i);
+        if (!frame || !frame->tag(FT_KEYFRAME))
+            continue;
+
+        if (!active_before_slide.empty())
+            active_before_slide += ';';
+        active_before_slide += std::to_string(frame->id());
+    }
+
+    for (size_t i = 0; i < map->frame_num(); ++i) {
+        Frame *frame = map->get_frame(i);
+        if (!frame || !frame->tag(FT_KEYFRAME) || !frame->image)
+            continue;
+
+        ArchivedKeyframe archived;
+        archived.frame_id = frame->id();
+        archived.timestamp = frame->image->t;
+        archived.body_pose = frame->pose;
+        archived.camera_pose = frame->get_pose(frame->camera);
+        archived.K = frame->K;
+        archived.observations.reserve(frame->keypoint_num());
+
+        for (size_t keypoint_index = 0;
+             keypoint_index < frame->keypoint_num();
+             ++keypoint_index) {
+            Track *track = frame->get_track(keypoint_index);
+            if (!track || track->tag(TT_TRASH) ||
+                !track->all_tagged(
+                    TT_VALID, TT_TRIANGULATED, TT_STATIC)) {
+                continue;
+            }
+
+            const vector<3> bearing =
+                frame->get_keypoint(keypoint_index);
+            const vector<3> landmark_world =
+                track->get_landmark_point();
+            const vector<2> pixel =
+                apply_k(bearing, frame->K);
+
+            if (!bearing.allFinite() ||
+                !landmark_world.allFinite() ||
+                !pixel.allFinite()) {
+                continue;
+            }
+
+            archived.observations.push_back(
+                ArchivedLandmarkObservation{
+                    track->id(),
+                    keypoint_index,
+                    bearing,
+                    pixel,
+                    landmark_world});
+        }
+
+        const double timestamp = archived.timestamp;
+        const size_t observation_count =
+            archived.observations.size();
+        const bool inserted =
+            keyframe_archive_.upsert(std::move(archived));
+
+        if (inserted) {
+            std::fprintf(
+                stderr,
+                "[PlaceKeyframeArchive] frame_id=%zu t=%.9f "
+                "observations=%zu archive_size=%zu "
+                "active_before_slide=%s\n",
+                frame->id(),
+                timestamp,
+                observation_count,
+                keyframe_archive_.size(),
+                active_before_slide.c_str());
+        }
+    }
+}
+
 bool SlidingWindowTracker::track() {
 
     if (config->parsac_flag()) {
@@ -162,6 +245,7 @@ bool SlidingWindowTracker::track() {
     if (manage_keyframe()) {
         track_landmark();
         refine_window();
+        archive_optimized_keyframes();
         slide_window();
     } else {
         refine_subwindow();

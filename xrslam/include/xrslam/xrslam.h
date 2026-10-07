@@ -188,6 +188,12 @@ class Image {
 
     virtual ~Image() = default;
     virtual void preprocess(double clipLimit, int width, int height) {}
+
+    // Sparse place-recognition paths may retain only the descriptor-source
+    // pixels while normal frontend working buffers are released.
+    virtual void retain_place_recognition_source(bool retain) {}
+    virtual bool has_place_recognition_source() const { return false; }
+
     virtual void release_image_buffer() = 0;
     virtual void detect_keypoints(std::vector<vector<2>> &keypoints,
                                   size_t max_points = 0,

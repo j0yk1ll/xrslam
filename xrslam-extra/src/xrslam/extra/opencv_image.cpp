@@ -160,6 +160,12 @@ void OpenCvImage::preprocess(double clipLimit, int width, int height) {
                             (int)level_num(), true);
 }
 
+void OpenCvImage::retain_place_recognition_source(bool retain) {
+    retain_raw_for_place_recognition_ = retain;
+    if (!retain)
+        raw.release();
+}
+
 void OpenCvImage::correct_distortion(const matrix<3> &intrinsics,
                                      const vector<4> &coeffs) {
     Mat new_image;
@@ -199,7 +205,8 @@ ORB *OpenCvImage::orb() {
 
 void OpenCvImage::release_image_buffer() {
     image.release();
-    raw.release();
+    if (!retain_raw_for_place_recognition_)
+        raw.release();
     image_pyramid.clear();
     image_levels.clear();
     interpolator_levels.clear();

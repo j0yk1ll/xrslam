@@ -2,6 +2,7 @@
 #define XRSLAM_SLIDING_WINDOW_TRACKER_H
 
 #include <xrslam/common.h>
+#include <xrslam/core/keyframe_archive.h>
 #include <xrslam/estimation/state.h>
 
 namespace xrslam {
@@ -51,6 +52,9 @@ class SlidingWindowTracker {
 
     void set_detail(XRSLAM::Detail *detail) { this->detail = detail; }
   private:
+    void archive_optimized_keyframes();
+
+    KeyframeArchive keyframe_archive_;
     std::shared_ptr<Config> config;
 
     XRSLAM::Detail *detail;

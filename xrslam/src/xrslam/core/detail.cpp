@@ -131,6 +131,18 @@ Pose XRSLAM::Detail::track_camera(std::shared_ptr<Image> image) {
         frame->tag(FT_FIX_MOTION) = true;
     }
 
+    if (const char *value = std::getenv("XRSLAM_PLACE_IMAGE_SHADOW");
+        value && std::string(value) == "1") {
+        image->retain_place_recognition_source(true);
+
+        const bool available =
+            image->has_place_recognition_source();
+        std::fprintf(
+            stderr,
+            "[PlaceImageRetain] frame_id=%zu t=%.9f available=%d\n",
+            frame->id(), image->t, available ? 1 : 0);
+    }
+
     if (config->has_imu())
         frames.emplace_back(std::move(frame));
     else
