@@ -1,5 +1,14 @@
 #include "XRSLAMManager.h"
 
+#include <xrslam/place_recognition.h>
+
+#if defined(XRSLAM_HAS_EIGENPLACES)
+#include <xrslam/extra/eigenplaces_descriptor_extractor.h>
+#endif
+
+#include <cstdlib>
+#include <stdexcept>
+
 #define XRSLAM_VERSION "0.1.0"
 
 namespace xrslam {
@@ -83,7 +92,36 @@ static const unsigned char logo_ascii[] = {
     0xE2, 0x95, 0x90, 0xE2, 0x95, 0x9D};
 
 void XRSLAMManager::Init(std::shared_ptr<Config> config) {
+    std::shared_ptr<PlaceDescriptorExtractor>
+        place_descriptor_extractor;
+
+    const char *descriptor_shadow =
+        std::getenv("XRSLAM_PLACE_DESCRIPTOR_SHADOW");
+    if (descriptor_shadow &&
+        std::string(descriptor_shadow) == "1") {
+#if defined(XRSLAM_HAS_EIGENPLACES)
+        const char *model_path =
+            std::getenv("XRSLAM_EIGENPLACES_MODEL");
+        if (!model_path || model_path[0] == '\0') {
+            throw std::runtime_error(
+                "XRSLAM_PLACE_DESCRIPTOR_SHADOW=1 requires "
+                "XRSLAM_EIGENPLACES_MODEL");
+        }
+
+        place_descriptor_extractor =
+            std::make_shared<
+                xrslam::extra::EigenPlacesDescriptorExtractor>(
+                model_path, false);
+#else
+        throw std::runtime_error(
+            "XRSLAM_PLACE_DESCRIPTOR_SHADOW=1 requires a build "
+            "configured with XRSLAM_ENABLE_EIGENPLACES=ON");
+#endif
+    }
+
     detail_ = std::make_unique<XRSLAM::Detail>(config);
+    detail_->set_place_descriptor_extractor(
+        std::move(place_descriptor_extractor));
     config_ = config;
     log_message(XRSLAM_LOG_INFO, (char *)logo_ascii, XRSLAM_VERSION_STRING);
     config_->log_config();

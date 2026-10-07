@@ -9,6 +9,9 @@
 #include <xrslam/localizer/localizer.h>
 #include <xrslam/map/frame.h>
 #include <xrslam/map/map.h>
+#include <xrslam/place_recognition.h>
+
+#include <cstdlib>
 
 namespace xrslam {
 
@@ -42,6 +45,16 @@ XRSLAM::Detail::~Detail() {
 }
 
 const Config *XRSLAM::Detail::configurations() const { return config.get(); }
+
+void XRSLAM::Detail::set_place_descriptor_extractor(
+    std::shared_ptr<PlaceDescriptorExtractor> extractor) {
+    place_descriptor_extractor_ = std::move(extractor);
+}
+
+PlaceDescriptorExtractor *
+XRSLAM::Detail::place_descriptor_extractor() const {
+    return place_descriptor_extractor_.get();
+}
 
 Pose XRSLAM::Detail::track_gyroscope(const double &t, const double &x,
                                      const double &y, const double &z) {
@@ -131,8 +144,16 @@ Pose XRSLAM::Detail::track_camera(std::shared_ptr<Image> image) {
         frame->tag(FT_FIX_MOTION) = true;
     }
 
-    if (const char *value = std::getenv("XRSLAM_PLACE_IMAGE_SHADOW");
-        value && std::string(value) == "1") {
+    const char *place_image_shadow =
+        std::getenv("XRSLAM_PLACE_IMAGE_SHADOW");
+    const char *place_descriptor_shadow =
+        std::getenv("XRSLAM_PLACE_DESCRIPTOR_SHADOW");
+    const bool retain_place_source =
+        (place_image_shadow &&
+         std::string(place_image_shadow) == "1") ||
+        (place_descriptor_shadow &&
+         std::string(place_descriptor_shadow) == "1");
+    if (retain_place_source) {
         image->retain_place_recognition_source(true);
 
         const bool available =

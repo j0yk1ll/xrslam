@@ -32,6 +32,11 @@ if(TARGET xrslam-extra-xfeat)
   target_compile_definitions(xrslam PRIVATE XRSLAM_HAS_XFEAT_ONNX=1)
 endif()
 
+if(TARGET xrslam-extra-eigenplaces)
+  target_link_libraries(xrslam PRIVATE xrslam-extra-eigenplaces)
+  target_compile_definitions(xrslam PRIVATE XRSLAM_HAS_EIGENPLACES=1)
+endif()
+
 target_include_directories(xrslam
   PUBLIC
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_PREFIX}/include>

@@ -16,7 +16,10 @@
 #include <xrslam/map/track.h>
 #include <xrslam/utility/unique_timer.h>
 
+#include <chrono>
+#include <cmath>
 #include <cstdlib>
+#include <exception>
 
 namespace xrslam {
 
@@ -25,6 +28,12 @@ namespace {
 bool learned_recovery_shadow_enabled() {
     const char *value = std::getenv(
         "XRSLAM_LEARNED_RECOVERY_SHADOW");
+    return value && std::string(value) == "1";
+}
+
+bool place_descriptor_shadow_enabled() {
+    const char *value =
+        std::getenv("XRSLAM_PLACE_DESCRIPTOR_SHADOW");
     return value && std::string(value) == "1";
 }
 
@@ -232,6 +241,118 @@ void SlidingWindowTracker::archive_optimized_keyframes() {
     }
 }
 
+void SlidingWindowTracker::extract_place_descriptors() {
+    if (!place_descriptor_shadow_enabled())
+        return;
+
+    if (!detail) {
+        std::fprintf(stderr,
+                     "[PlaceDescriptorShadow] reject=no_detail\n");
+        return;
+    }
+
+    PlaceDescriptorExtractor *extractor =
+        detail->place_descriptor_extractor();
+    if (!extractor) {
+        std::fprintf(stderr,
+                     "[PlaceDescriptorShadow] reject=no_extractor\n");
+        return;
+    }
+
+    for (size_t i = 0; i < map->frame_num(); ++i) {
+        Frame *frame = map->get_frame(i);
+        if (!frame || !frame->tag(FT_KEYFRAME) || !frame->image)
+            continue;
+
+        const PlaceKey key =
+            static_cast<PlaceKey>(frame->id());
+        if (place_keyframes_.find(key))
+            continue;
+
+        const bool source_available_before =
+            frame->image->has_place_recognition_source();
+        if (!source_available_before) {
+            std::fprintf(
+                stderr,
+                "[PlaceDescriptorShadow] frame_id=%zu t=%.9f "
+                "reject=source_unavailable source_available_before=0\n",
+                frame->id(), frame->image->t);
+            continue;
+        }
+
+        const auto begin = std::chrono::steady_clock::now();
+        try {
+            PlaceDescriptor descriptor =
+                extractor->extract(*frame->image);
+
+            bool finite = !descriptor.empty();
+            double squared_norm = 0.0;
+            for (float value : descriptor.values) {
+                finite = finite && std::isfinite(value);
+                const double value_double =
+                    static_cast<double>(value);
+                squared_norm += value_double * value_double;
+            }
+            const double norm = std::sqrt(squared_norm);
+            const size_t dimension = descriptor.dimension();
+
+            if (!finite ||
+                dimension != extractor->dimension() ||
+                !std::isfinite(norm) ||
+                norm <= 1.0e-12) {
+                std::fprintf(
+                    stderr,
+                    "[PlaceDescriptorShadow] frame_id=%zu t=%.9f "
+                    "reject=invalid_descriptor dimension=%zu "
+                    "expected_dimension=%zu norm=%.9f finite=%d\n",
+                    frame->id(), frame->image->t,
+                    dimension, extractor->dimension(), norm,
+                    finite ? 1 : 0);
+                continue;
+            }
+
+            PlaceKeyframe place_keyframe;
+            place_keyframe.key = key;
+            place_keyframe.frame_id = frame->id();
+            place_keyframe.timestamp = frame->image->t;
+            place_keyframe.descriptor = std::move(descriptor);
+
+            if (!place_keyframes_.add(place_keyframe)) {
+                std::fprintf(
+                    stderr,
+                    "[PlaceDescriptorShadow] frame_id=%zu t=%.9f "
+                    "reject=duplicate_key\n",
+                    frame->id(), frame->image->t);
+                continue;
+            }
+
+            frame->image->retain_place_recognition_source(false);
+            const bool source_available_after =
+                frame->image->has_place_recognition_source();
+            const double extract_ms =
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - begin)
+                    .count();
+
+            std::fprintf(
+                stderr,
+                "[PlaceDescriptorShadow] frame_id=%zu t=%.9f "
+                "dimension=%zu norm=%.9f finite=1 "
+                "source_available_before=1 source_available_after=%d "
+                "extract_ms=%.3f descriptor_count=%zu\n",
+                frame->id(), frame->image->t, dimension, norm,
+                source_available_after ? 1 : 0,
+                extract_ms, place_keyframes_.size());
+        } catch (const std::exception &e) {
+            std::fprintf(
+                stderr,
+                "[PlaceDescriptorShadow] frame_id=%zu t=%.9f "
+                "reject=extract_exception error=%s\n",
+                frame->id(), frame->image->t, e.what());
+        }
+    }
+}
+
 bool SlidingWindowTracker::track() {
 
     if (config->parsac_flag()) {
@@ -245,6 +366,7 @@ bool SlidingWindowTracker::track() {
     if (manage_keyframe()) {
         track_landmark();
         refine_window();
+        extract_place_descriptors();
         archive_optimized_keyframes();
         slide_window();
     } else {

@@ -12,6 +12,7 @@ class Frame;
 class FrontendWorker;
 class Image;
 class Map;
+class PlaceDescriptorExtractor;
 class Synchronizer;
 
 struct XRSLAM::Detail {
@@ -29,6 +30,10 @@ struct XRSLAM::Detail {
     virtual ~Detail();
 
     const Config *configurations() const;
+
+    void set_place_descriptor_extractor(
+        std::shared_ptr<PlaceDescriptorExtractor> extractor);
+    PlaceDescriptorExtractor *place_descriptor_extractor() const;
 
     Pose track_gyroscope(const double &t, const double &x, const double &y,
                          const double &z);
@@ -67,6 +72,7 @@ struct XRSLAM::Detail {
     std::deque<std::unique_ptr<Frame>> frames;
     std::deque<ImuData> frontal_imus;
 
+    std::shared_ptr<PlaceDescriptorExtractor> place_descriptor_extractor_;
     std::shared_ptr<Config> config;
 };
 

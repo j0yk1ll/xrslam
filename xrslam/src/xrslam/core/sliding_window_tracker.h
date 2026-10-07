@@ -4,6 +4,7 @@
 #include <xrslam/common.h>
 #include <xrslam/core/keyframe_archive.h>
 #include <xrslam/estimation/state.h>
+#include <xrslam/place_recognition.h>
 
 namespace xrslam {
 
@@ -53,11 +54,13 @@ class SlidingWindowTracker {
     void set_detail(XRSLAM::Detail *detail) { this->detail = detail; }
   private:
     void archive_optimized_keyframes();
+    void extract_place_descriptors();
 
     KeyframeArchive keyframe_archive_;
+    PlaceKeyframeStore place_keyframes_;
     std::shared_ptr<Config> config;
 
-    XRSLAM::Detail *detail;
+    XRSLAM::Detail *detail = nullptr;
 };
 
 } // namespace xrslam

@@ -24,13 +24,14 @@ struct PlaceCandidate {
     float distance = 0.0f;
 };
 
-// Metadata intentionally stays independent of the descriptor/index backend.
-// Later loop-closure stages can attach local-feature/landmark archives without
-// coupling those records to EigenPlaces or USearch types.
+// Value-owned place-recognition record. The descriptor stays expressed only
+// through the backend-agnostic PlaceDescriptor type; concrete EigenPlaces and
+// database implementation details remain outside xrslam-core.
 struct PlaceKeyframe {
     PlaceKey key = 0;
     size_t frame_id = 0;
     double timestamp = 0.0;
+    PlaceDescriptor descriptor;
 };
 
 class PlaceDescriptorExtractor {
