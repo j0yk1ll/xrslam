@@ -67,7 +67,9 @@ if(TARGET depends::opencv)
   add_library(xrslam-extra-opencv-image
     ${XRSLAM_EXTRA_INCLUDE_DIR}/xrslam/extra/image_undistorter.h
     ${XRSLAM_EXTRA_INCLUDE_DIR}/xrslam/extra/opencv_image.h
+    ${XRSLAM_EXTRA_INCLUDE_DIR}/xrslam/extra/orb_local_descriptor_extractor.h
     ${XRSLAM_EXTRA_SOURCE_DIR}/xrslam/extra/opencv_image.cpp
+    ${XRSLAM_EXTRA_SOURCE_DIR}/xrslam/extra/orb_local_descriptor_extractor.cpp
   )
   target_link_libraries(xrslam-extra-opencv-image
     PUBLIC

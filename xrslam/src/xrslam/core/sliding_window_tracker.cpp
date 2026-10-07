@@ -37,6 +37,29 @@ bool place_descriptor_shadow_enabled() {
     return value && std::string(value) == "1";
 }
 
+bool local_descriptor_shadow_enabled() {
+    const char *value =
+        std::getenv("XRSLAM_LOCAL_DESCRIPTOR_SHADOW");
+    return value && std::string(value) == "1";
+}
+
+bool keyframe_archive_shadow_enabled() {
+    const char *value =
+        std::getenv("XRSLAM_KEYFRAME_ARCHIVE_SHADOW");
+    return (value && std::string(value) == "1") ||
+           local_descriptor_shadow_enabled();
+}
+
+const char *local_descriptor_type_name(LocalDescriptorType type) {
+    switch (type) {
+    case LocalDescriptorType::BINARY_U8:
+        return "binary_u8";
+    case LocalDescriptorType::FLOAT32:
+        return "float32";
+    }
+    return "unknown";
+}
+
 double recovery_observation_rmse_px(
     const Frame *frame,
     const RecoveryLearnedObservationSet &observations) {
@@ -160,9 +183,24 @@ void SlidingWindowTracker::mirror_frame(Map *feature_tracking_map,
 }
 
 void SlidingWindowTracker::archive_optimized_keyframes() {
-    const char *value = std::getenv("XRSLAM_KEYFRAME_ARCHIVE_SHADOW");
-    if (!value || std::string(value) != "1")
+    if (!keyframe_archive_shadow_enabled())
         return;
+
+    LocalDescriptorExtractor *local_extractor = nullptr;
+    if (local_descriptor_shadow_enabled()) {
+        if (!detail) {
+            std::fprintf(stderr,
+                         "[LocalDescriptorShadow] reject=no_detail\n");
+        } else {
+            local_extractor =
+                detail->local_descriptor_extractor();
+            if (!local_extractor) {
+                std::fprintf(
+                    stderr,
+                    "[LocalDescriptorShadow] reject=no_extractor\n");
+            }
+        }
+    }
 
     std::string active_before_slide;
     for (size_t i = 0; i < map->frame_num(); ++i) {
@@ -223,6 +261,160 @@ void SlidingWindowTracker::archive_optimized_keyframes() {
         const double timestamp = archived.timestamp;
         const size_t observation_count =
             archived.observations.size();
+
+        const ArchivedKeyframe *existing =
+            keyframe_archive_.get(frame->id());
+        const bool local_descriptors_already_complete =
+            existing && existing->local_descriptors_complete;
+
+        if (local_extractor &&
+            !local_descriptors_already_complete) {
+            const bool source_available_before =
+                frame->image->has_place_recognition_source();
+
+            if (!source_available_before) {
+                std::fprintf(
+                    stderr,
+                    "[LocalDescriptorShadow] frame_id=%zu t=%.9f "
+                    "reject=source_unavailable "
+                    "source_available_before=0\n",
+                    frame->id(), frame->image->t);
+            } else {
+                std::vector<vector<2>> points;
+                points.reserve(archived.observations.size());
+                for (const auto &observation :
+                     archived.observations) {
+                    points.emplace_back(observation.pixel);
+                }
+
+                const auto begin =
+                    std::chrono::steady_clock::now();
+                try {
+                    LocalDescriptorSet descriptors =
+                        local_extractor->extract(
+                            *frame->image, points);
+                    const size_t descriptor_count =
+                        descriptors.size();
+
+                    bool mapping_valid =
+                        descriptors.valid() &&
+                        descriptors.type ==
+                            local_extractor->type() &&
+                        descriptors.dimension ==
+                            local_extractor->dimension();
+
+                    size_t previous_source_index = 0;
+                    for (size_t row = 0;
+                         mapping_valid &&
+                         row < descriptor_count; ++row) {
+                        const size_t source_index =
+                            descriptors.source_indices[row];
+                        if (source_index >=
+                                archived.observations.size() ||
+                            (row > 0 &&
+                             source_index <=
+                                 previous_source_index)) {
+                            mapping_valid = false;
+                            break;
+                        }
+                        previous_source_index = source_index;
+                    }
+
+                    if (!points.empty() &&
+                        descriptor_count == 0) {
+                        mapping_valid = false;
+                    }
+
+                    if (!mapping_valid) {
+                        std::fprintf(
+                            stderr,
+                            "[LocalDescriptorShadow] "
+                            "frame_id=%zu t=%.9f "
+                            "reject=invalid_descriptors "
+                            "observations=%zu descriptors=%zu "
+                            "type=%s dimension=%zu "
+                            "expected_type=%s "
+                            "expected_dimension=%zu\n",
+                            frame->id(), frame->image->t,
+                            archived.observations.size(),
+                            descriptor_count,
+                            local_descriptor_type_name(
+                                descriptors.type),
+                            descriptors.dimension,
+                            local_descriptor_type_name(
+                                local_extractor->type()),
+                            local_extractor->dimension());
+                    } else {
+                        archived.local_descriptors =
+                            std::move(descriptors);
+                        archived.local_descriptors_complete =
+                            true;
+                        ++local_descriptor_keyframe_count_;
+
+                        const bool place_ready =
+                            !place_descriptor_shadow_enabled() ||
+                            place_keyframes_.find(
+                                static_cast<PlaceKey>(
+                                    frame->id()));
+                        if (place_ready) {
+                            frame->image
+                                ->retain_place_recognition_source(
+                                    false);
+                        }
+
+                        const bool source_available_after =
+                            frame->image
+                                ->has_place_recognition_source();
+                        const double extract_ms =
+                            std::chrono::duration<
+                                double, std::milli>(
+                                std::chrono::steady_clock::now() -
+                                begin)
+                                .count();
+                        const double coverage =
+                            archived.observations.empty()
+                                ? 1.0
+                                : static_cast<double>(
+                                      archived.local_descriptors
+                                          .size()) /
+                                      static_cast<double>(
+                                          archived.observations
+                                              .size());
+
+                        std::fprintf(
+                            stderr,
+                            "[LocalDescriptorShadow] "
+                            "frame_id=%zu t=%.9f "
+                            "observations=%zu descriptors=%zu "
+                            "coverage=%.6f type=%s "
+                            "dimension=%zu "
+                            "source_available_before=1 "
+                            "source_available_after=%d "
+                            "extract_ms=%.3f "
+                            "keyframe_count=%zu\n",
+                            frame->id(), frame->image->t,
+                            archived.observations.size(),
+                            archived.local_descriptors.size(),
+                            coverage,
+                            local_descriptor_type_name(
+                                archived.local_descriptors.type),
+                            archived.local_descriptors.dimension,
+                            source_available_after ? 1 : 0,
+                            extract_ms,
+                            local_descriptor_keyframe_count_);
+                    }
+                } catch (const std::exception &e) {
+                    std::fprintf(
+                        stderr,
+                        "[LocalDescriptorShadow] "
+                        "frame_id=%zu t=%.9f "
+                        "reject=extract_exception error=%s\n",
+                        frame->id(), frame->image->t,
+                        e.what());
+                }
+            }
+        }
+
         const bool inserted =
             keyframe_archive_.upsert(std::move(archived));
 
@@ -326,7 +518,19 @@ void SlidingWindowTracker::extract_place_descriptors() {
                 continue;
             }
 
-            frame->image->retain_place_recognition_source(false);
+            bool local_ready = true;
+            if (local_descriptor_shadow_enabled()) {
+                const ArchivedKeyframe *archived =
+                    keyframe_archive_.get(frame->id());
+                local_ready =
+                    archived &&
+                    archived->local_descriptors_complete;
+            }
+            if (local_ready) {
+                frame->image
+                    ->retain_place_recognition_source(false);
+            }
+
             const bool source_available_after =
                 frame->image->has_place_recognition_source();
             const double extract_ms =

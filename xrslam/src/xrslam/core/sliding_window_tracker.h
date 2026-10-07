@@ -58,6 +58,7 @@ class SlidingWindowTracker {
 
     KeyframeArchive keyframe_archive_;
     PlaceKeyframeStore place_keyframes_;
+    size_t local_descriptor_keyframe_count_ = 0;
     std::shared_ptr<Config> config;
 
     XRSLAM::Detail *detail = nullptr;

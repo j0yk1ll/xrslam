@@ -1,6 +1,7 @@
 #include "XRSLAMManager.h"
 
 #include <xrslam/place_recognition.h>
+#include <xrslam/extra/orb_local_descriptor_extractor.h>
 
 #if defined(XRSLAM_HAS_EIGENPLACES)
 #include <xrslam/extra/eigenplaces_descriptor_extractor.h>
@@ -94,6 +95,8 @@ static const unsigned char logo_ascii[] = {
 void XRSLAMManager::Init(std::shared_ptr<Config> config) {
     std::shared_ptr<PlaceDescriptorExtractor>
         place_descriptor_extractor;
+    std::shared_ptr<LocalDescriptorExtractor>
+        local_descriptor_extractor;
 
     const char *descriptor_shadow =
         std::getenv("XRSLAM_PLACE_DESCRIPTOR_SHADOW");
@@ -119,9 +122,20 @@ void XRSLAMManager::Init(std::shared_ptr<Config> config) {
 #endif
     }
 
+    const char *local_descriptor_shadow =
+        std::getenv("XRSLAM_LOCAL_DESCRIPTOR_SHADOW");
+    if (local_descriptor_shadow &&
+        std::string(local_descriptor_shadow) == "1") {
+        local_descriptor_extractor =
+            std::make_shared<
+                xrslam::extra::OrbLocalDescriptorExtractor>();
+    }
+
     detail_ = std::make_unique<XRSLAM::Detail>(config);
     detail_->set_place_descriptor_extractor(
         std::move(place_descriptor_extractor));
+    detail_->set_local_descriptor_extractor(
+        std::move(local_descriptor_extractor));
     config_ = config;
     log_message(XRSLAM_LOG_INFO, (char *)logo_ascii, XRSLAM_VERSION_STRING);
     config_->log_config();

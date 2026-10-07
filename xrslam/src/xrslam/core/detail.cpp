@@ -56,6 +56,16 @@ XRSLAM::Detail::place_descriptor_extractor() const {
     return place_descriptor_extractor_.get();
 }
 
+void XRSLAM::Detail::set_local_descriptor_extractor(
+    std::shared_ptr<LocalDescriptorExtractor> extractor) {
+    local_descriptor_extractor_ = std::move(extractor);
+}
+
+LocalDescriptorExtractor *
+XRSLAM::Detail::local_descriptor_extractor() const {
+    return local_descriptor_extractor_.get();
+}
+
 Pose XRSLAM::Detail::track_gyroscope(const double &t, const double &x,
                                      const double &y, const double &z) {
     if (!config->has_imu())
@@ -148,11 +158,15 @@ Pose XRSLAM::Detail::track_camera(std::shared_ptr<Image> image) {
         std::getenv("XRSLAM_PLACE_IMAGE_SHADOW");
     const char *place_descriptor_shadow =
         std::getenv("XRSLAM_PLACE_DESCRIPTOR_SHADOW");
+    const char *local_descriptor_shadow =
+        std::getenv("XRSLAM_LOCAL_DESCRIPTOR_SHADOW");
     const bool retain_place_source =
         (place_image_shadow &&
          std::string(place_image_shadow) == "1") ||
         (place_descriptor_shadow &&
-         std::string(place_descriptor_shadow) == "1");
+         std::string(place_descriptor_shadow) == "1") ||
+        (local_descriptor_shadow &&
+         std::string(local_descriptor_shadow) == "1");
     if (retain_place_source) {
         image->retain_place_recognition_source(true);
 
