@@ -162,6 +162,8 @@ Pose XRSLAM::Detail::track_camera(std::shared_ptr<Image> image) {
         std::getenv("XRSLAM_LOCAL_DESCRIPTOR_SHADOW");
     const char *orb_association_shadow =
         std::getenv("XRSLAM_ORB_ASSOCIATION_SHADOW");
+    const char *orb_pnp_shadow =
+        std::getenv("XRSLAM_ORB_PNP_SHADOW");
     const bool retain_place_source =
         (place_image_shadow &&
          std::string(place_image_shadow) == "1") ||
@@ -170,7 +172,9 @@ Pose XRSLAM::Detail::track_camera(std::shared_ptr<Image> image) {
         (local_descriptor_shadow &&
          std::string(local_descriptor_shadow) == "1") ||
         (orb_association_shadow &&
-         std::string(orb_association_shadow) == "1");
+         std::string(orb_association_shadow) == "1") ||
+        (orb_pnp_shadow &&
+         std::string(orb_pnp_shadow) == "1");
     if (retain_place_source) {
         image->retain_place_recognition_source(true);
 

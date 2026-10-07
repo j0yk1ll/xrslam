@@ -126,10 +126,14 @@ void XRSLAMManager::Init(std::shared_ptr<Config> config) {
         std::getenv("XRSLAM_LOCAL_DESCRIPTOR_SHADOW");
     const char *orb_association_shadow =
         std::getenv("XRSLAM_ORB_ASSOCIATION_SHADOW");
+    const char *orb_pnp_shadow =
+        std::getenv("XRSLAM_ORB_PNP_SHADOW");
     if ((local_descriptor_shadow &&
          std::string(local_descriptor_shadow) == "1") ||
         (orb_association_shadow &&
-         std::string(orb_association_shadow) == "1")) {
+         std::string(orb_association_shadow) == "1") ||
+        (orb_pnp_shadow &&
+         std::string(orb_pnp_shadow) == "1")) {
         local_descriptor_extractor =
             std::make_shared<
                 xrslam::extra::OrbLocalDescriptorExtractor>();

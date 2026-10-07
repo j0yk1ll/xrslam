@@ -39,10 +39,17 @@ bool place_descriptor_shadow_enabled() {
     return value && std::string(value) == "1";
 }
 
+bool orb_pnp_shadow_enabled() {
+    const char *value =
+        std::getenv("XRSLAM_ORB_PNP_SHADOW");
+    return value && std::string(value) == "1";
+}
+
 bool orb_association_shadow_enabled() {
     const char *value =
         std::getenv("XRSLAM_ORB_ASSOCIATION_SHADOW");
-    return value && std::string(value) == "1";
+    return (value && std::string(value) == "1") ||
+           orb_pnp_shadow_enabled();
 }
 
 bool local_descriptor_shadow_enabled() {
@@ -77,6 +84,35 @@ size_t orb_association_lag() {
             warned = true;
         }
         return default_lag;
+    }
+
+    return static_cast<size_t>(parsed);
+}
+
+size_t orb_pnp_max_hamming() {
+    constexpr size_t default_max_hamming = 60;
+    constexpr size_t maximum_max_hamming = 256;
+
+    const char *value =
+        std::getenv("XRSLAM_ORB_PNP_MAX_HAMMING");
+    if (!value || value[0] == '\0')
+        return default_max_hamming;
+
+    char *end = nullptr;
+    const unsigned long long parsed =
+        std::strtoull(value, &end, 10);
+    if (end == value || *end != '\0' ||
+        parsed > maximum_max_hamming) {
+        static bool warned = false;
+        if (!warned) {
+            std::fprintf(
+                stderr,
+                "[OrbPnPShadow] invalid "
+                "XRSLAM_ORB_PNP_MAX_HAMMING=%s; using %zu\n",
+                value, default_max_hamming);
+            warned = true;
+        }
+        return default_max_hamming;
     }
 
     return static_cast<size_t>(parsed);
@@ -673,7 +709,21 @@ void SlidingWindowTracker::diagnose_orb_association(
                 match_begin)
                 .count();
 
+        std::vector<vector<3>> pnp_points_world;
+        std::vector<vector<2>> pnp_points_normalized;
+        std::vector<vector<2>> pnp_points_pixel;
         size_t mapped_2d3d = 0;
+        size_t pnp_hamming_filtered = 0;
+        const size_t pnp_max_hamming =
+            orb_pnp_max_hamming();
+        pnp_points_world.reserve(
+            matches.mutual_matches.size());
+        pnp_points_normalized.reserve(
+            matches.mutual_matches.size());
+        pnp_points_pixel.reserve(
+            matches.mutual_matches.size());
+
+        const matrix<3> K_inv = frame->K.inverse();
         for (const auto &match :
              matches.mutual_matches) {
             if (match.reference_descriptor_index >=
@@ -693,12 +743,37 @@ void SlidingWindowTracker::diagnose_orb_association(
                 current_descriptors
                     .source_indices[
                         match.current_descriptor_index];
-            if (observation_index <
-                    reference->observations.size() &&
-                current_point_index <
+            if (observation_index >=
+                    reference->observations.size() ||
+                current_point_index >=
                     current_points.size()) {
-                ++mapped_2d3d;
+                continue;
             }
+
+            const vector<3> &landmark_world =
+                reference->observations[
+                    observation_index].landmark_world;
+            const vector<2> &pixel =
+                current_points[current_point_index];
+            const vector<3> normalized_h =
+                K_inv *
+                vector<3>{pixel.x(), pixel.y(), 1.0};
+            if (!landmark_world.allFinite() ||
+                !normalized_h.allFinite() ||
+                std::abs(normalized_h.z()) <= 1.0e-12) {
+                continue;
+            }
+
+            ++mapped_2d3d;
+            if (match.distance > pnp_max_hamming) {
+                ++pnp_hamming_filtered;
+                continue;
+            }
+
+            pnp_points_world.emplace_back(landmark_world);
+            pnp_points_normalized.emplace_back(
+                normalized_h.hnormalized());
+            pnp_points_pixel.emplace_back(pixel);
         }
 
         const HammingDistanceStats raw_stats =
@@ -743,6 +818,283 @@ void SlidingWindowTracker::diagnose_orb_association(
             mutual_stats.median, mutual_stats.p75,
             mutual_stats.max, mutual_stats.mean,
             extract_ms, match_ms);
+
+        if (orb_pnp_shadow_enabled()) {
+            constexpr size_t min_correspondences = 6;
+            constexpr size_t min_verified_inliers = 8;
+            constexpr double min_verified_inlier_ratio = 0.50;
+            const size_t correspondence_count =
+                pnp_points_world.size();
+
+            std::fprintf(
+                stderr,
+                "[OrbPnPInputShadow] current=%zu reference=%zu "
+                "mapped_2d3d=%zu hamming_filtered=%zu "
+                "correspondences=%zu max_hamming=%zu\n",
+                frame->id(), reference_frame_id,
+                mapped_2d3d, pnp_hamming_filtered,
+                correspondence_count, pnp_max_hamming);
+
+            if (correspondence_count <
+                min_correspondences) {
+                std::fprintf(
+                    stderr,
+                    "[OrbPnPShadow] current=%zu t=%.9f "
+                    "reference=%zu reference_t=%.9f lag=%zu "
+                    "correspondences=%zu min_required=%zu "
+                    "skip=insufficient_correspondences "
+                    "max_hamming=%zu min_inliers=%zu "
+                    "min_inlier_ratio=%.6f "
+                    "geometrically_verified=0 "
+                    "state_mutation=0\n",
+                    frame->id(), frame->image->t,
+                    reference_frame_id,
+                    reference->timestamp, lag,
+                    correspondence_count,
+                    min_correspondences,
+                    pnp_max_hamming,
+                    min_verified_inliers,
+                    min_verified_inlier_ratio);
+            } else {
+                const auto pnp_begin =
+                    std::chrono::steady_clock::now();
+                try {
+                    std::vector<char> inlier_mask;
+                    const double pnp_noise_sigma_norm =
+                        1.0 / frame->K(0, 0);
+                    const matrix<4> T_cw =
+                        find_pnp_matrix(
+                            pnp_points_world,
+                            pnp_points_normalized,
+                            inlier_mask,
+                            pnp_noise_sigma_norm);
+                    const double pnp_ms =
+                        std::chrono::duration<
+                            double, std::milli>(
+                            std::chrono::steady_clock::now() -
+                            pnp_begin)
+                            .count();
+
+                    if (inlier_mask.size() !=
+                        correspondence_count) {
+                        std::fprintf(
+                            stderr,
+                            "[OrbPnPShadow] current=%zu "
+                            "reference=%zu lag=%zu "
+                            "correspondences=%zu "
+                            "reject=invalid_inlier_mask "
+                            "mask_size=%zu pnp_ms=%.3f "
+                            "max_hamming=%zu min_inliers=%zu "
+                            "min_inlier_ratio=%.6f "
+                            "geometrically_verified=0 "
+                            "state_mutation=0\n",
+                            frame->id(),
+                            reference_frame_id, lag,
+                            correspondence_count,
+                            inlier_mask.size(), pnp_ms,
+                            pnp_max_hamming,
+                            min_verified_inliers,
+                            min_verified_inlier_ratio);
+                    } else {
+                        size_t inlier_count = 0;
+                        for (char inlier : inlier_mask) {
+                            if (inlier)
+                                ++inlier_count;
+                        }
+
+                        const double inlier_ratio =
+                            static_cast<double>(
+                                inlier_count) /
+                            static_cast<double>(
+                                correspondence_count);
+
+                        if (inlier_count <
+                                min_correspondences ||
+                            !T_cw.allFinite()) {
+                            std::fprintf(
+                                stderr,
+                                "[OrbPnPShadow] "
+                                "current=%zu t=%.9f "
+                                "reference=%zu "
+                                "reference_t=%.9f lag=%zu "
+                                "correspondences=%zu "
+                                "inliers=%zu "
+                                "inlier_ratio=%.6f "
+                                "pose_finite=0 "
+                                "pnp_threshold_parameter_px=1.000 "
+                                "pnp_ms=%.3f "
+                                "max_hamming=%zu min_inliers=%zu "
+                                "min_inlier_ratio=%.6f "
+                                "geometrically_verified=0 "
+                                "state_mutation=0\n",
+                                frame->id(),
+                                frame->image->t,
+                                reference_frame_id,
+                                reference->timestamp,
+                                lag,
+                                correspondence_count,
+                                inlier_count,
+                                inlier_ratio,
+                                pnp_ms,
+                                pnp_max_hamming,
+                                min_verified_inliers,
+                                min_verified_inlier_ratio);
+                        } else {
+                            const matrix<3> R_cw =
+                                T_cw.block<3, 3>(0, 0);
+                            const vector<3> t_cw =
+                                T_cw.block<3, 1>(0, 3);
+                            const matrix<3> R_wc =
+                                R_cw.transpose();
+
+                            PoseState pnp_camera_pose;
+                            pnp_camera_pose.q =
+                                quaternion(R_wc);
+                            pnp_camera_pose.q.normalize();
+                            pnp_camera_pose.p =
+                                -R_wc * t_cw;
+
+                            double inlier_squared_error =
+                                0.0;
+                            size_t positive_depth_inliers =
+                                0;
+                            for (size_t i = 0;
+                                 i < correspondence_count;
+                                 ++i) {
+                                if (!inlier_mask[i])
+                                    continue;
+
+                                const vector<3> point_camera =
+                                    R_cw *
+                                        pnp_points_world[i] +
+                                    t_cw;
+                                if (!point_camera.allFinite() ||
+                                    point_camera.z() <= 1.0e-6) {
+                                    continue;
+                                }
+
+                                const vector<2> projected =
+                                    apply_k(
+                                        point_camera,
+                                        frame->K);
+                                const double error =
+                                    (projected -
+                                     pnp_points_pixel[i])
+                                        .norm();
+                                inlier_squared_error +=
+                                    error * error;
+                                ++positive_depth_inliers;
+                            }
+
+                            const double inlier_rmse_px =
+                                positive_depth_inliers == 0
+                                    ? std::numeric_limits<
+                                          double>::quiet_NaN()
+                                    : std::sqrt(
+                                          inlier_squared_error /
+                                          static_cast<double>(
+                                              positive_depth_inliers));
+
+                            const PoseState vio_camera_pose =
+                                frame->get_pose(
+                                    frame->camera);
+                            const double
+                                translation_delta_m =
+                                    (pnp_camera_pose.p -
+                                     vio_camera_pose.p)
+                                        .norm();
+                            const double
+                                rotation_delta_deg =
+                                    camera_rotation_delta_deg(
+                                        pnp_camera_pose,
+                                        vio_camera_pose);
+
+                            const bool pose_finite =
+                                pnp_camera_pose.p
+                                    .allFinite() &&
+                                pnp_camera_pose.q.coeffs()
+                                    .allFinite() &&
+                                std::isfinite(
+                                    translation_delta_m) &&
+                                std::isfinite(
+                                    rotation_delta_deg);
+                            const bool geometrically_verified =
+                                pose_finite &&
+                                inlier_count >=
+                                    min_verified_inliers &&
+                                inlier_ratio >=
+                                    min_verified_inlier_ratio;
+
+                            std::fprintf(
+                                stderr,
+                                "[OrbPnPShadow] "
+                                "current=%zu t=%.9f "
+                                "reference=%zu "
+                                "reference_t=%.9f lag=%zu "
+                                "correspondences=%zu "
+                                "inliers=%zu "
+                                "inlier_ratio=%.6f "
+                                "positive_depth_inliers=%zu "
+                                "inlier_rmse_px=%.6f "
+                                "pnp_p=%.9f,%.9f,%.9f "
+                                "pnp_q=%.9f,%.9f,%.9f,%.9f "
+                                "translation_delta_m=%.9f "
+                                "rotation_delta_deg=%.9f "
+                                "pose_finite=%d "
+                                "pnp_threshold_parameter_px=1.000 "
+                                "pnp_ms=%.3f "
+                                "max_hamming=%zu min_inliers=%zu "
+                                "min_inlier_ratio=%.6f "
+                                "geometrically_verified=%d "
+                                "state_mutation=0\n",
+                                frame->id(),
+                                frame->image->t,
+                                reference_frame_id,
+                                reference->timestamp,
+                                lag,
+                                correspondence_count,
+                                inlier_count,
+                                inlier_ratio,
+                                positive_depth_inliers,
+                                inlier_rmse_px,
+                                pnp_camera_pose.p.x(),
+                                pnp_camera_pose.p.y(),
+                                pnp_camera_pose.p.z(),
+                                pnp_camera_pose.q.x(),
+                                pnp_camera_pose.q.y(),
+                                pnp_camera_pose.q.z(),
+                                pnp_camera_pose.q.w(),
+                                translation_delta_m,
+                                rotation_delta_deg,
+                                pose_finite ? 1 : 0,
+                                pnp_ms,
+                                pnp_max_hamming,
+                                min_verified_inliers,
+                                min_verified_inlier_ratio,
+                                geometrically_verified ? 1 : 0);
+                        }
+                    }
+                } catch (const std::exception &e) {
+                    std::fprintf(
+                        stderr,
+                        "[OrbPnPShadow] current=%zu "
+                        "reference=%zu lag=%zu "
+                        "correspondences=%zu "
+                        "reject=pnp_exception error=%s "
+                        "max_hamming=%zu min_inliers=%zu "
+                        "min_inlier_ratio=%.6f "
+                        "geometrically_verified=0 "
+                        "state_mutation=0\n",
+                        frame->id(),
+                        reference_frame_id, lag,
+                        correspondence_count,
+                        e.what(),
+                        pnp_max_hamming,
+                        min_verified_inliers,
+                        min_verified_inlier_ratio);
+                }
+            }
+        }
     } catch (const std::exception &e) {
         std::fprintf(
             stderr,
