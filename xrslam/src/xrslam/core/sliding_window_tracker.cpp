@@ -1260,8 +1260,12 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
         size_t reference_frame_id = 0;
         double reference_timestamp = 0.0;
         double distance = 0.0;
+        size_t correspondence_count = 0;
         size_t inlier_count = 0;
         double inlier_ratio = 0.0;
+        PoseState pnp_camera_pose;
+        double translation_delta_m = 0.0;
+        double rotation_delta_deg = 0.0;
         double abs_timestamp_separation = 0.0;
     };
     std::vector<VerifiedCandidateTemporalDiagnostic>
@@ -1734,8 +1738,12 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
                         reference_frame_id,
                         historical->timestamp,
                         candidate.distance,
+                        correspondence_count,
                         inlier_count,
                         inlier_ratio,
+                        pnp_camera_pose,
+                        translation_delta_m,
+                        rotation_delta_deg,
                         std::abs(timestamp_separation)});
             }
 
@@ -1972,6 +1980,8 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
         double max_inlier_ratio = 0.0;
         double min_abs_timestamp_separation =
             std::numeric_limits<double>::infinity();
+        const VerifiedCandidateTemporalDiagnostic *
+            representative = nullptr;
         size_t event_id = 0;
         size_t consecutive_age = 1;
         bool persisted_from_previous = false;
@@ -1979,8 +1989,26 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
         size_t current_frame_gap = 0;
     };
 
+    const auto better_representative =
+        [](const VerifiedCandidateTemporalDiagnostic *candidate,
+           const VerifiedCandidateTemporalDiagnostic *current) {
+            if (!current)
+                return true;
+            if (candidate->inlier_count != current->inlier_count)
+                return candidate->inlier_count > current->inlier_count;
+            if (candidate->inlier_ratio != current->inlier_ratio)
+                return candidate->inlier_ratio > current->inlier_ratio;
+            if (candidate->rank != current->rank)
+                return candidate->rank < current->rank;
+            if (candidate->distance != current->distance)
+                return candidate->distance < current->distance;
+            return candidate->reference_frame_id <
+                   current->reference_frame_id;
+        };
+
     const auto build_neighborhoods =
-        [&verified_temporal_diagnostics](
+        [&verified_temporal_diagnostics,
+         &better_representative](
             double minimum_abs_separation_s) {
             std::vector<
                 const VerifiedCandidateTemporalDiagnostic *>
@@ -2061,6 +2089,10 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
                     std::min(
                         group.min_abs_timestamp_separation,
                         verified->abs_timestamp_separation);
+                if (better_representative(
+                        verified, group.representative)) {
+                    group.representative = verified;
+                }
             }
             return groups;
         };
@@ -2244,6 +2276,67 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
                     group.consecutive_age,
                     group.previous_current_frame_id,
                     group.current_frame_gap);
+                if (threshold_s == 5.0 &&
+                    group.consecutive_age == 3 &&
+                    group.representative) {
+                    const auto &representative =
+                        *group.representative;
+                    std::fprintf(
+                        stderr,
+                        "[PlaceConfirmedEventRepresentativeShadow] "
+                        "current=%zu t=%.9f threshold_s=5.0 "
+                        "event_id=%zu confirmation_age=%zu "
+                        "member_count=%zu "
+                        "reference_t_min=%.9f "
+                        "reference_t_max=%.9f "
+                        "reference_frame_min=%zu "
+                        "reference_frame_max=%zu "
+                        "representative_key=%llu "
+                        "representative_frame=%zu "
+                        "representative_t=%.9f "
+                        "representative_rank=%zu "
+                        "representative_distance=%.9f "
+                        "correspondences=%zu "
+                        "inliers=%zu inlier_ratio=%.6f "
+                        "pnp_p=%.9f,%.9f,%.9f "
+                        "pnp_q=%.9f,%.9f,%.9f,%.9f "
+                        "translation_delta_m=%.9f "
+                        "rotation_delta_deg=%.9f "
+                        "representative_dt10_eligible=%d "
+                        "selection=max_inliers_then_ratio_then_rank_"
+                        "then_distance_then_frame "
+                        "confirmed_shadow=1 acceptance_applied=0 "
+                        "state_mutation=0\n",
+                        frame->id(), frame->image->t,
+                        group.event_id,
+                        group.consecutive_age,
+                        group.member_count,
+                        group.reference_t_min,
+                        group.reference_t_max,
+                        group.reference_frame_min,
+                        group.reference_frame_max,
+                        static_cast<unsigned long long>(
+                            representative.key),
+                        representative.reference_frame_id,
+                        representative.reference_timestamp,
+                        representative.rank,
+                        representative.distance,
+                        representative.correspondence_count,
+                        representative.inlier_count,
+                        representative.inlier_ratio,
+                        representative.pnp_camera_pose.p.x(),
+                        representative.pnp_camera_pose.p.y(),
+                        representative.pnp_camera_pose.p.z(),
+                        representative.pnp_camera_pose.q.x(),
+                        representative.pnp_camera_pose.q.y(),
+                        representative.pnp_camera_pose.q.z(),
+                        representative.pnp_camera_pose.q.w(),
+                        representative.translation_delta_m,
+                        representative.rotation_delta_deg,
+                        representative.abs_timestamp_separation >= 10.0
+                            ? 1
+                            : 0);
+                }
             }
         };
 
