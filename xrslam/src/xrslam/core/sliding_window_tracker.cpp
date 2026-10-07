@@ -16,10 +16,12 @@
 #include <xrslam/map/track.h>
 #include <xrslam/utility/unique_timer.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <exception>
+#include <limits>
 
 namespace xrslam {
 
@@ -37,10 +39,84 @@ bool place_descriptor_shadow_enabled() {
     return value && std::string(value) == "1";
 }
 
+bool orb_association_shadow_enabled() {
+    const char *value =
+        std::getenv("XRSLAM_ORB_ASSOCIATION_SHADOW");
+    return value && std::string(value) == "1";
+}
+
 bool local_descriptor_shadow_enabled() {
     const char *value =
         std::getenv("XRSLAM_LOCAL_DESCRIPTOR_SHADOW");
-    return value && std::string(value) == "1";
+    return (value && std::string(value) == "1") ||
+           orb_association_shadow_enabled();
+}
+
+size_t orb_association_lag() {
+    constexpr size_t default_lag = 20;
+
+    const char *value =
+        std::getenv("XRSLAM_ORB_ASSOCIATION_LAG");
+    if (!value || value[0] == '\0')
+        return default_lag;
+
+    char *end = nullptr;
+    const unsigned long long parsed =
+        std::strtoull(value, &end, 10);
+    if (end == value || *end != '\0' || parsed == 0 ||
+        parsed >
+            static_cast<unsigned long long>(
+                std::numeric_limits<size_t>::max())) {
+        static bool warned = false;
+        if (!warned) {
+            std::fprintf(
+                stderr,
+                "[OrbAssociationShadow] invalid "
+                "XRSLAM_ORB_ASSOCIATION_LAG=%s; using %zu\n",
+                value, default_lag);
+            warned = true;
+        }
+        return default_lag;
+    }
+
+    return static_cast<size_t>(parsed);
+}
+
+struct HammingDistanceStats {
+    size_t min = 0;
+    size_t p25 = 0;
+    size_t median = 0;
+    size_t p75 = 0;
+    size_t max = 0;
+    double mean = 0.0;
+};
+
+HammingDistanceStats hamming_distance_stats(
+    const std::vector<LocalDescriptorMatch> &matches) {
+    HammingDistanceStats stats;
+    if (matches.empty())
+        return stats;
+
+    std::vector<size_t> distances;
+    distances.reserve(matches.size());
+    double total = 0.0;
+    for (const auto &match : matches) {
+        distances.emplace_back(match.distance);
+        total += static_cast<double>(match.distance);
+    }
+    std::sort(distances.begin(), distances.end());
+
+    stats.min = distances.front();
+    stats.p25 = distances[
+        (distances.size() - 1) / 4];
+    stats.median = distances[
+        (distances.size() - 1) / 2];
+    stats.p75 = distances[
+        3 * (distances.size() - 1) / 4];
+    stats.max = distances.back();
+    stats.mean =
+        total / static_cast<double>(distances.size());
+    return stats;
 }
 
 bool keyframe_archive_shadow_enabled() {
@@ -356,7 +432,8 @@ void SlidingWindowTracker::archive_optimized_keyframes() {
                             place_keyframes_.find(
                                 static_cast<PlaceKey>(
                                     frame->id()));
-                        if (place_ready) {
+                        if (place_ready &&
+                            !orb_association_shadow_enabled()) {
                             frame->image
                                 ->retain_place_recognition_source(
                                     false);
@@ -418,6 +495,31 @@ void SlidingWindowTracker::archive_optimized_keyframes() {
         const bool inserted =
             keyframe_archive_.upsert(std::move(archived));
 
+        if (orb_association_shadow_enabled()) {
+            const ArchivedKeyframe *stored =
+                keyframe_archive_.get(frame->id());
+            if (stored &&
+                stored->local_descriptors_complete &&
+                frame->image
+                    ->has_place_recognition_source() &&
+                orb_association_processed_
+                    .emplace(frame->id())
+                    .second) {
+                diagnose_orb_association(frame);
+
+                const bool place_ready =
+                    !place_descriptor_shadow_enabled() ||
+                    place_keyframes_.find(
+                        static_cast<PlaceKey>(
+                            frame->id()));
+                if (place_ready) {
+                    frame->image
+                        ->retain_place_recognition_source(
+                            false);
+                }
+            }
+        }
+
         if (inserted) {
             std::fprintf(
                 stderr,
@@ -430,6 +532,225 @@ void SlidingWindowTracker::archive_optimized_keyframes() {
                 keyframe_archive_.size(),
                 active_before_slide.c_str());
         }
+    }
+}
+
+void SlidingWindowTracker::diagnose_orb_association(
+    Frame *frame) {
+    if (!orb_association_shadow_enabled() ||
+        !frame || !frame->image || !detail) {
+        return;
+    }
+
+    LocalDescriptorExtractor *extractor =
+        detail->local_descriptor_extractor();
+    if (!extractor ||
+        extractor->type() !=
+            LocalDescriptorType::BINARY_U8) {
+        std::fprintf(
+            stderr,
+            "[OrbAssociationShadow] current=%zu "
+            "reject=binary_extractor_unavailable\n",
+            frame->id());
+        return;
+    }
+
+    const auto &order =
+        keyframe_archive_.insertion_order();
+    const auto current_it =
+        std::find(
+            order.begin(), order.end(), frame->id());
+    if (current_it == order.end()) {
+        std::fprintf(
+            stderr,
+            "[OrbAssociationShadow] current=%zu "
+            "reject=current_not_archived\n",
+            frame->id());
+        return;
+    }
+
+    const size_t current_archive_index =
+        static_cast<size_t>(
+            current_it - order.begin());
+    const size_t lag = orb_association_lag();
+    if (current_archive_index < lag) {
+        std::fprintf(
+            stderr,
+            "[OrbAssociationShadow] current=%zu t=%.9f "
+            "lag=%zu archive_index=%zu "
+            "skip=insufficient_history\n",
+            frame->id(), frame->image->t,
+            lag, current_archive_index);
+        return;
+    }
+
+    const size_t reference_frame_id =
+        order[current_archive_index - lag];
+    const ArchivedKeyframe *reference =
+        keyframe_archive_.get(reference_frame_id);
+    if (!reference ||
+        !reference->local_descriptors_complete ||
+        !reference->local_descriptors.valid() ||
+        reference->local_descriptors.type !=
+            LocalDescriptorType::BINARY_U8 ||
+        reference->local_descriptors.dimension !=
+            extractor->dimension()) {
+        std::fprintf(
+            stderr,
+            "[OrbAssociationShadow] current=%zu "
+            "reference=%zu lag=%zu "
+            "reject=reference_descriptors_unavailable\n",
+            frame->id(), reference_frame_id, lag);
+        return;
+    }
+    if (reference->local_descriptors.size() == 0) {
+        std::fprintf(
+            stderr,
+            "[OrbAssociationShadow] current=%zu "
+            "reference=%zu lag=%zu "
+            "skip=reference_empty\n",
+            frame->id(), reference_frame_id, lag);
+        return;
+    }
+
+    std::vector<vector<2>> current_points;
+    current_points.reserve(frame->keypoint_num());
+    for (size_t keypoint_index = 0;
+         keypoint_index < frame->keypoint_num();
+         ++keypoint_index) {
+        const vector<2> pixel =
+            apply_k(
+                frame->get_keypoint(keypoint_index),
+                frame->K);
+        if (pixel.allFinite())
+            current_points.emplace_back(pixel);
+    }
+
+    const auto extract_begin =
+        std::chrono::steady_clock::now();
+    try {
+        LocalDescriptorSet current_descriptors =
+            extractor->extract(
+                *frame->image, current_points);
+        const double extract_ms =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() -
+                extract_begin)
+                .count();
+
+        if (!current_descriptors.valid() ||
+            current_descriptors.type !=
+                LocalDescriptorType::BINARY_U8 ||
+            current_descriptors.dimension !=
+                reference->local_descriptors.dimension ||
+            current_descriptors.size() == 0) {
+            std::fprintf(
+                stderr,
+                "[OrbAssociationShadow] current=%zu "
+                "reference=%zu lag=%zu "
+                "reject=current_descriptors_invalid "
+                "current_keypoints=%zu current_points=%zu "
+                "current_descriptors=%zu "
+                "dimension=%zu extract_ms=%.3f\n",
+                frame->id(), reference_frame_id, lag,
+                frame->keypoint_num(),
+                current_points.size(),
+                current_descriptors.size(),
+                current_descriptors.dimension,
+                extract_ms);
+            return;
+        }
+
+        const auto match_begin =
+            std::chrono::steady_clock::now();
+        const LocalDescriptorMatchResult matches =
+            match_binary_descriptors_mutual_nn(
+                reference->local_descriptors,
+                current_descriptors);
+        const double match_ms =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() -
+                match_begin)
+                .count();
+
+        size_t mapped_2d3d = 0;
+        for (const auto &match :
+             matches.mutual_matches) {
+            if (match.reference_descriptor_index >=
+                    reference->local_descriptors
+                        .source_indices.size() ||
+                match.current_descriptor_index >=
+                    current_descriptors
+                        .source_indices.size()) {
+                continue;
+            }
+
+            const size_t observation_index =
+                reference->local_descriptors
+                    .source_indices[
+                        match.reference_descriptor_index];
+            const size_t current_point_index =
+                current_descriptors
+                    .source_indices[
+                        match.current_descriptor_index];
+            if (observation_index <
+                    reference->observations.size() &&
+                current_point_index <
+                    current_points.size()) {
+                ++mapped_2d3d;
+            }
+        }
+
+        const HammingDistanceStats raw_stats =
+            hamming_distance_stats(
+                matches.nearest_neighbors);
+        const HammingDistanceStats mutual_stats =
+            hamming_distance_stats(
+                matches.mutual_matches);
+
+        std::fprintf(
+            stderr,
+            "[OrbAssociationShadow] "
+            "current=%zu t=%.9f "
+            "reference=%zu reference_t=%.9f lag=%zu "
+            "reference_observations=%zu "
+            "reference_descriptors=%zu "
+            "current_keypoints=%zu current_points=%zu "
+            "current_descriptors=%zu "
+            "raw_nn=%zu mutual=%zu mapped_2d3d=%zu "
+            "raw_hamming_min=%zu raw_hamming_p25=%zu "
+            "raw_hamming_median=%zu raw_hamming_p75=%zu "
+            "raw_hamming_max=%zu raw_hamming_mean=%.3f "
+            "mutual_hamming_min=%zu mutual_hamming_p25=%zu "
+            "mutual_hamming_median=%zu mutual_hamming_p75=%zu "
+            "mutual_hamming_max=%zu mutual_hamming_mean=%.3f "
+            "extract_ms=%.3f match_ms=%.3f "
+            "threshold=none state_mutation=0\n",
+            frame->id(), frame->image->t,
+            reference_frame_id, reference->timestamp, lag,
+            reference->observations.size(),
+            reference->local_descriptors.size(),
+            frame->keypoint_num(),
+            current_points.size(),
+            current_descriptors.size(),
+            matches.nearest_neighbors.size(),
+            matches.mutual_matches.size(),
+            mapped_2d3d,
+            raw_stats.min, raw_stats.p25,
+            raw_stats.median, raw_stats.p75,
+            raw_stats.max, raw_stats.mean,
+            mutual_stats.min, mutual_stats.p25,
+            mutual_stats.median, mutual_stats.p75,
+            mutual_stats.max, mutual_stats.mean,
+            extract_ms, match_ms);
+    } catch (const std::exception &e) {
+        std::fprintf(
+            stderr,
+            "[OrbAssociationShadow] current=%zu "
+            "reference=%zu lag=%zu "
+            "reject=extract_exception error=%s\n",
+            frame->id(), reference_frame_id,
+            lag, e.what());
     }
 }
 

@@ -121,7 +121,15 @@ class OpenCvImage : public Image {
     void preprocess(double clipLimit, int width, int height) override;
     void retain_place_recognition_source(bool retain) override;
     bool has_place_recognition_source() const override {
-        return !raw.empty();
+        return !place_recognition_source_.empty();
+    }
+    const cv::Mat &place_recognition_source() const {
+        return place_recognition_source_;
+    }
+    void set_place_recognition_source(const cv::Mat &source) {
+        // cv::Mat assignment is intentionally shallow: the canonical source
+        // initially shares the input allocation rather than copying it.
+        place_recognition_source_ = source;
     }
     void correct_distortion(const matrix<3> &intrinsics,
                             const vector<4> &coeffs);
@@ -133,7 +141,8 @@ class OpenCvImage : public Image {
     DepthSource depth_source_type = DepthSource::SENSOR_METRIC;
 
   private:
-    bool retain_raw_for_place_recognition_ = false;
+    cv::Mat place_recognition_source_;
+    bool retain_place_recognition_source_ = false;
     std::vector<cv::Mat> image_pyramid;
     std::vector<cv::Mat> image_levels;
     std::vector<vector<2>> scale_levels;

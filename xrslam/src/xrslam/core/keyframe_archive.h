@@ -55,12 +55,88 @@ class KeyframeArchive {
 
         // Geometry is refreshed after every optimization. Local descriptors
         // are immutable appearance data sampled once from the accepted
-        // keyframe source, so preserve them across geometry refreshes.
+        // keyframe source. Their source_indices, however, refer to the
+        // observation vector that existed at extraction time, so they must be
+        // remapped when a later optimization refresh changes that vector.
         if (it->second.local_descriptors_complete &&
             !keyframe.local_descriptors_complete) {
             keyframe.local_descriptors_complete = true;
-            keyframe.local_descriptors =
-                std::move(it->second.local_descriptors);
+
+            const ArchivedKeyframe &previous = it->second;
+            const LocalDescriptorSet &previous_descriptors =
+                previous.local_descriptors;
+
+            LocalDescriptorSet remapped;
+            remapped.type = previous_descriptors.type;
+            remapped.dimension = previous_descriptors.dimension;
+
+            std::unordered_map<size_t, size_t>
+                keypoint_to_observation;
+            keypoint_to_observation.reserve(
+                keyframe.observations.size());
+            for (size_t observation_index = 0;
+                 observation_index < keyframe.observations.size();
+                 ++observation_index) {
+                keypoint_to_observation.emplace(
+                    keyframe.observations[observation_index]
+                        .keypoint_index,
+                    observation_index);
+            }
+
+            if (previous_descriptors.valid()) {
+                for (size_t row = 0;
+                     row < previous_descriptors.size();
+                     ++row) {
+                    const size_t previous_observation_index =
+                        previous_descriptors.source_indices[row];
+                    if (previous_observation_index >=
+                        previous.observations.size()) {
+                        continue;
+                    }
+
+                    const ArchivedLandmarkObservation &old_observation =
+                        previous.observations[
+                            previous_observation_index];
+                    const auto new_it =
+                        keypoint_to_observation.find(
+                            old_observation.keypoint_index);
+                    if (new_it == keypoint_to_observation.end())
+                        continue;
+
+                    const size_t new_observation_index =
+                        new_it->second;
+                    if (keyframe.observations[new_observation_index]
+                            .track_id != old_observation.track_id) {
+                        continue;
+                    }
+
+                    remapped.source_indices.emplace_back(
+                        new_observation_index);
+
+                    const size_t begin =
+                        row * previous_descriptors.dimension;
+                    const size_t end =
+                        begin + previous_descriptors.dimension;
+                    if (previous_descriptors.type ==
+                        LocalDescriptorType::BINARY_U8) {
+                        remapped.binary_values.insert(
+                            remapped.binary_values.end(),
+                            previous_descriptors.binary_values.begin() +
+                                begin,
+                            previous_descriptors.binary_values.begin() +
+                                end);
+                    } else {
+                        remapped.float_values.insert(
+                            remapped.float_values.end(),
+                            previous_descriptors.float_values.begin() +
+                                begin,
+                            previous_descriptors.float_values.begin() +
+                                end);
+                    }
+                }
+            }
+
+            keyframe.local_descriptors = std::move(remapped);
         }
         it->second = std::move(keyframe);
         return false;

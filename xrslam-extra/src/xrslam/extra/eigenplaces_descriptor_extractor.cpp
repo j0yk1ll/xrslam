@@ -16,9 +16,11 @@ namespace xrslam::extra {
 namespace {
 
 cv::Mat make_rgb_input(const OpenCvImage &image) {
-    const cv::Mat &source = image.raw.empty() ? image.image : image.raw;
+    const cv::Mat &source =
+        image.place_recognition_source();
     if (source.empty())
-        throw std::runtime_error("EigenPlaces received an empty image");
+        throw std::runtime_error(
+            "EigenPlaces place-recognition source is unavailable");
 
     cv::Mat rgb;
     if (source.channels() == 1) {

@@ -6,6 +6,8 @@
 #include <xrslam/estimation/state.h>
 #include <xrslam/place_recognition.h>
 
+#include <unordered_set>
+
 namespace xrslam {
 
 class Config;
@@ -54,11 +56,13 @@ class SlidingWindowTracker {
     void set_detail(XRSLAM::Detail *detail) { this->detail = detail; }
   private:
     void archive_optimized_keyframes();
+    void diagnose_orb_association(Frame *frame);
     void extract_place_descriptors();
 
     KeyframeArchive keyframe_archive_;
     PlaceKeyframeStore place_keyframes_;
     size_t local_descriptor_keyframe_count_ = 0;
+    std::unordered_set<size_t> orb_association_processed_;
     std::shared_ptr<Config> config;
 
     XRSLAM::Detail *detail = nullptr;

@@ -124,8 +124,12 @@ void XRSLAMManager::Init(std::shared_ptr<Config> config) {
 
     const char *local_descriptor_shadow =
         std::getenv("XRSLAM_LOCAL_DESCRIPTOR_SHADOW");
-    if (local_descriptor_shadow &&
-        std::string(local_descriptor_shadow) == "1") {
+    const char *orb_association_shadow =
+        std::getenv("XRSLAM_ORB_ASSOCIATION_SHADOW");
+    if ((local_descriptor_shadow &&
+         std::string(local_descriptor_shadow) == "1") ||
+        (orb_association_shadow &&
+         std::string(orb_association_shadow) == "1")) {
         local_descriptor_extractor =
             std::make_shared<
                 xrslam::extra::OrbLocalDescriptorExtractor>();
@@ -180,7 +184,13 @@ void XRSLAMManager::PushImage(XRSLAMImage *image) {
             exit(-1);
         }
             
+        // Preserve the canonical pre-CLAHE camera image for place recognition.
+        // The OpenCvImage source initially shares this allocation, so enabling
+        // global/local descriptors does not add another full-frame copy.
+        // If correct_distortion() is used, both the frontend image and this
+        // source are rectified into the same pixel geometry.
         opencv_image->raw = img.clone();
+        opencv_image->set_place_recognition_source(opencv_image->raw);
 
         std::lock_guard<std::mutex> lck(input_mutex_);
         if (!pending_depth_.empty() &&

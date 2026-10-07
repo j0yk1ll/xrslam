@@ -161,9 +161,9 @@ void OpenCvImage::preprocess(double clipLimit, int width, int height) {
 }
 
 void OpenCvImage::retain_place_recognition_source(bool retain) {
-    retain_raw_for_place_recognition_ = retain;
+    retain_place_recognition_source_ = retain;
     if (!retain)
-        raw.release();
+        place_recognition_source_.release();
 }
 
 void OpenCvImage::correct_distortion(const matrix<3> &intrinsics,
@@ -180,6 +180,12 @@ void OpenCvImage::correct_distortion(const matrix<3> &intrinsics,
     }
     undistort(image, new_image, K, cvcoeffs);
     image = new_image;
+
+    if (!place_recognition_source_.empty()) {
+        Mat new_source;
+        undistort(place_recognition_source_, new_source, K, cvcoeffs);
+        place_recognition_source_ = new_source;
+    }
 }
 
 CLAHE *OpenCvImage::clahe(double clipLimit, int width, int height) {
@@ -205,8 +211,9 @@ ORB *OpenCvImage::orb() {
 
 void OpenCvImage::release_image_buffer() {
     image.release();
-    if (!retain_raw_for_place_recognition_)
-        raw.release();
+    raw.release();
+    if (!retain_place_recognition_source_)
+        place_recognition_source_.release();
     image_pyramid.clear();
     image_levels.clear();
     interpolator_levels.clear();

@@ -92,6 +92,31 @@ class LocalDescriptorExtractor {
             const std::vector<vector<2>> &points) = 0;
 };
 
+struct LocalDescriptorMatch {
+    size_t reference_descriptor_index = static_cast<size_t>(-1);
+    size_t current_descriptor_index = static_cast<size_t>(-1);
+    size_t distance = 0;
+};
+
+struct LocalDescriptorMatchResult {
+    // One best current descriptor for every reference descriptor when the
+    // current set is non-empty. No distance threshold or acceptance decision
+    // is applied here.
+    std::vector<LocalDescriptorMatch> nearest_neighbors;
+
+    // Subset of nearest_neighbors whose reverse nearest neighbor points back
+    // to the same reference descriptor.
+    std::vector<LocalDescriptorMatch> mutual_matches;
+};
+
+// Backend-independent Hamming association for binary local descriptors.
+// Invalid, non-binary, dimension-mismatched, or empty inputs return an empty
+// result. Ties are deterministic and prefer the lower descriptor index.
+LocalDescriptorMatchResult
+match_binary_descriptors_mutual_nn(
+    const LocalDescriptorSet &reference,
+    const LocalDescriptorSet &current);
+
 class PlaceDatabase {
   public:
     virtual ~PlaceDatabase() = default;

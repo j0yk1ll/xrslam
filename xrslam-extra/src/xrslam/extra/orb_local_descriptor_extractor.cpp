@@ -18,11 +18,11 @@ namespace xrslam::extra {
 namespace {
 
 cv::Mat descriptor_source(const OpenCvImage &image) {
-    // 0104b retains raw after ordinary frontend buffers are released. GFTT
-    // pixels remain in the same image coordinate system; both historical and
-    // future ORB matching must use this retained source consistently.
+    // ORB samples the canonical pre-CLAHE place-recognition source. It stays
+    // geometrically aligned with the frontend image while remaining
+    // independent of frontend-specific photometric enhancement.
     const cv::Mat &source =
-        !image.raw.empty() ? image.raw : image.image;
+        image.place_recognition_source();
     if (source.empty())
         throw std::runtime_error(
             "ORB local descriptor source is unavailable");

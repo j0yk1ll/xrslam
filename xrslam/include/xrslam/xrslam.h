@@ -189,8 +189,11 @@ class Image {
     virtual ~Image() = default;
     virtual void preprocess(double clipLimit, int width, int height) {}
 
-    // Sparse place-recognition paths may retain only the descriptor-source
-    // pixels while normal frontend working buffers are released.
+    // Sparse place-recognition paths may retain only a canonical camera image
+    // for global/local descriptors while normal frontend working buffers are
+    // released. Concrete backends may preserve color; frontend-specific
+    // photometric processing such as CLAHE must not modify this retained
+    // source.
     virtual void retain_place_recognition_source(bool retain) {}
     virtual bool has_place_recognition_source() const { return false; }
 
