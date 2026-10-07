@@ -74,6 +74,9 @@ class SlidingWindowTracker {
     size_t previous_verified_current_frame_id_ =
         static_cast<size_t>(-1);
     std::vector<PlaceKey> previous_verified_place_keys_;
+    std::vector<PlaceKey> previous_temporal_dt2_place_keys_;
+    std::vector<PlaceKey> previous_temporal_dt5_place_keys_;
+    std::vector<PlaceKey> previous_temporal_dt10_place_keys_;
     size_t local_descriptor_keyframe_count_ = 0;
     std::unordered_set<size_t> orb_association_processed_;
     std::shared_ptr<Config> config;

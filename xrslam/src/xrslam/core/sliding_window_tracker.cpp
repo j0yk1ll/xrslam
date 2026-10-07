@@ -1254,6 +1254,14 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
     size_t verified_reference_frame_max = 0;
     size_t verified_max_frame_separation = 0;
     double verified_max_abs_timestamp_separation = 0.0;
+    struct VerifiedCandidateTemporalDiagnostic {
+        PlaceKey key = 0;
+        double reference_timestamp = 0.0;
+        double abs_timestamp_separation = 0.0;
+    };
+    std::vector<VerifiedCandidateTemporalDiagnostic>
+        verified_temporal_diagnostics;
+    verified_temporal_diagnostics.reserve(candidates.size());
 
     for (size_t rank = 0;
          rank < candidates.size();
@@ -1714,6 +1722,11 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
                     std::max(
                         verified_max_abs_timestamp_separation,
                         std::abs(timestamp_separation));
+                verified_temporal_diagnostics.push_back(
+                    VerifiedCandidateTemporalDiagnostic{
+                        candidate.key,
+                        historical->timestamp,
+                        std::abs(timestamp_separation)});
             }
 
             std::fprintf(
@@ -1824,6 +1837,116 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
         }
     }
 
+    std::vector<PlaceKey> temporal_dt2_keys;
+    std::vector<PlaceKey> temporal_dt5_keys;
+    std::vector<PlaceKey> temporal_dt10_keys;
+    std::vector<double> temporal_dt2_reference_times;
+    std::vector<double> temporal_dt5_reference_times;
+    std::vector<double> temporal_dt10_reference_times;
+    temporal_dt2_keys.reserve(
+        verified_temporal_diagnostics.size());
+    temporal_dt5_keys.reserve(
+        verified_temporal_diagnostics.size());
+    temporal_dt10_keys.reserve(
+        verified_temporal_diagnostics.size());
+    temporal_dt2_reference_times.reserve(
+        verified_temporal_diagnostics.size());
+    temporal_dt5_reference_times.reserve(
+        verified_temporal_diagnostics.size());
+    temporal_dt10_reference_times.reserve(
+        verified_temporal_diagnostics.size());
+
+    for (const auto &verified :
+         verified_temporal_diagnostics) {
+        if (verified.abs_timestamp_separation >= 2.0) {
+            temporal_dt2_keys.emplace_back(verified.key);
+            temporal_dt2_reference_times.emplace_back(
+                verified.reference_timestamp);
+        }
+        if (verified.abs_timestamp_separation >= 5.0) {
+            temporal_dt5_keys.emplace_back(verified.key);
+            temporal_dt5_reference_times.emplace_back(
+                verified.reference_timestamp);
+        }
+        if (verified.abs_timestamp_separation >= 10.0) {
+            temporal_dt10_keys.emplace_back(verified.key);
+            temporal_dt10_reference_times.emplace_back(
+                verified.reference_timestamp);
+        }
+    }
+
+    const auto count_overlap =
+        [](const std::vector<PlaceKey> &current,
+           const std::vector<PlaceKey> &previous) {
+            size_t overlap = 0;
+            for (PlaceKey key : current) {
+                if (std::find(
+                        previous.begin(),
+                        previous.end(),
+                        key) != previous.end()) {
+                    ++overlap;
+                }
+            }
+            return overlap;
+        };
+
+    const auto count_time_groups =
+        [](std::vector<double> timestamps,
+           double max_neighbor_gap_s) {
+            if (timestamps.empty())
+                return size_t{0};
+            std::sort(timestamps.begin(), timestamps.end());
+            size_t groups = 1;
+            for (size_t i = 1; i < timestamps.size(); ++i) {
+                if (timestamps[i] - timestamps[i - 1] >
+                    max_neighbor_gap_s) {
+                    ++groups;
+                }
+            }
+            return groups;
+        };
+
+    const size_t temporal_dt2_overlap =
+        count_overlap(
+            temporal_dt2_keys,
+            previous_temporal_dt2_place_keys_);
+    const size_t temporal_dt5_overlap =
+        count_overlap(
+            temporal_dt5_keys,
+            previous_temporal_dt5_place_keys_);
+    const size_t temporal_dt10_overlap =
+        count_overlap(
+            temporal_dt10_keys,
+            previous_temporal_dt10_place_keys_);
+
+    std::fprintf(
+        stderr,
+        "[PlaceTemporalPolicyShadow] current=%zu t=%.9f "
+        "verified_count=%zu "
+        "eligible_dt2=%zu eligible_dt5=%zu eligible_dt10=%zu "
+        "overlap_dt2=%zu overlap_dt5=%zu overlap_dt10=%zu "
+        "groups_dt2_r0p5=%zu groups_dt2_r1=%zu groups_dt2_r2=%zu "
+        "groups_dt5_r0p5=%zu groups_dt5_r1=%zu groups_dt5_r2=%zu "
+        "groups_dt10_r0p5=%zu groups_dt10_r1=%zu groups_dt10_r2=%zu "
+        "policy_applied=0 temporal_excluded=0 state_mutation=0\n",
+        frame->id(), frame->image->t,
+        verified_keys.size(),
+        temporal_dt2_keys.size(),
+        temporal_dt5_keys.size(),
+        temporal_dt10_keys.size(),
+        temporal_dt2_overlap,
+        temporal_dt5_overlap,
+        temporal_dt10_overlap,
+        count_time_groups(temporal_dt2_reference_times, 0.5),
+        count_time_groups(temporal_dt2_reference_times, 1.0),
+        count_time_groups(temporal_dt2_reference_times, 2.0),
+        count_time_groups(temporal_dt5_reference_times, 0.5),
+        count_time_groups(temporal_dt5_reference_times, 1.0),
+        count_time_groups(temporal_dt5_reference_times, 2.0),
+        count_time_groups(temporal_dt10_reference_times, 0.5),
+        count_time_groups(temporal_dt10_reference_times, 1.0),
+        count_time_groups(temporal_dt10_reference_times, 2.0));
+
     const size_t invalid_frame_id =
         static_cast<size_t>(-1);
     const bool previous_available =
@@ -1886,6 +2009,12 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
             exact_overlap);
     }
 
+    previous_temporal_dt2_place_keys_ =
+        std::move(temporal_dt2_keys);
+    previous_temporal_dt5_place_keys_ =
+        std::move(temporal_dt5_keys);
+    previous_temporal_dt10_place_keys_ =
+        std::move(temporal_dt10_keys);
     previous_verified_current_frame_id_ = frame->id();
     previous_verified_place_keys_ = std::move(verified_keys);
 }
