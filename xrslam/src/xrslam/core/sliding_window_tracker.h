@@ -60,6 +60,14 @@ class SlidingWindowTracker {
         std::vector<PlaceCandidate> candidates;
     };
 
+    struct PlaceNeighborhoodEventShadowState {
+        size_t event_id = 0;
+        double reference_t_min = 0.0;
+        double reference_t_max = 0.0;
+        size_t consecutive_age = 0;
+        size_t last_current_frame_id = 0;
+    };
+
     void archive_optimized_keyframes();
     void diagnose_orb_association(Frame *frame);
     void diagnose_retrieved_place_candidates(
@@ -77,6 +85,11 @@ class SlidingWindowTracker {
     std::vector<PlaceKey> previous_temporal_dt2_place_keys_;
     std::vector<PlaceKey> previous_temporal_dt5_place_keys_;
     std::vector<PlaceKey> previous_temporal_dt10_place_keys_;
+    std::vector<PlaceNeighborhoodEventShadowState>
+        previous_dt5_neighborhood_events_;
+    std::vector<PlaceNeighborhoodEventShadowState>
+        previous_dt10_neighborhood_events_;
+    size_t next_place_neighborhood_event_id_ = 1;
     size_t local_descriptor_keyframe_count_ = 0;
     std::unordered_set<size_t> orb_association_processed_;
     std::shared_ptr<Config> config;

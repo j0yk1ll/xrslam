@@ -1256,7 +1256,12 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
     double verified_max_abs_timestamp_separation = 0.0;
     struct VerifiedCandidateTemporalDiagnostic {
         PlaceKey key = 0;
+        size_t rank = 0;
+        size_t reference_frame_id = 0;
         double reference_timestamp = 0.0;
+        double distance = 0.0;
+        size_t inlier_count = 0;
+        double inlier_ratio = 0.0;
         double abs_timestamp_separation = 0.0;
     };
     std::vector<VerifiedCandidateTemporalDiagnostic>
@@ -1725,7 +1730,12 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
                 verified_temporal_diagnostics.push_back(
                     VerifiedCandidateTemporalDiagnostic{
                         candidate.key,
+                        rank,
+                        reference_frame_id,
                         historical->timestamp,
+                        candidate.distance,
+                        inlier_count,
+                        inlier_ratio,
                         std::abs(timestamp_separation)});
             }
 
@@ -1946,6 +1956,320 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
         count_time_groups(temporal_dt10_reference_times, 0.5),
         count_time_groups(temporal_dt10_reference_times, 1.0),
         count_time_groups(temporal_dt10_reference_times, 2.0));
+
+    struct NeighborhoodDiagnostic {
+        double reference_t_min = 0.0;
+        double reference_t_max = 0.0;
+        size_t reference_frame_min =
+            std::numeric_limits<size_t>::max();
+        size_t reference_frame_max = 0;
+        size_t member_count = 0;
+        size_t best_rank =
+            std::numeric_limits<size_t>::max();
+        double best_distance =
+            std::numeric_limits<double>::infinity();
+        size_t max_inliers = 0;
+        double max_inlier_ratio = 0.0;
+        double min_abs_timestamp_separation =
+            std::numeric_limits<double>::infinity();
+        size_t event_id = 0;
+        size_t consecutive_age = 1;
+        bool persisted_from_previous = false;
+        size_t previous_current_frame_id = 0;
+        size_t current_frame_gap = 0;
+    };
+
+    const auto build_neighborhoods =
+        [&verified_temporal_diagnostics](
+            double minimum_abs_separation_s) {
+            std::vector<
+                const VerifiedCandidateTemporalDiagnostic *>
+                eligible;
+            for (const auto &verified :
+                 verified_temporal_diagnostics) {
+                if (verified.abs_timestamp_separation >=
+                    minimum_abs_separation_s) {
+                    eligible.emplace_back(&verified);
+                }
+            }
+
+            std::sort(
+                eligible.begin(), eligible.end(),
+                [](const auto *a, const auto *b) {
+                    if (a->reference_timestamp !=
+                        b->reference_timestamp) {
+                        return a->reference_timestamp <
+                               b->reference_timestamp;
+                    }
+                    return a->rank < b->rank;
+                });
+
+            std::vector<NeighborhoodDiagnostic> groups;
+            for (const auto *verified : eligible) {
+                if (groups.empty() ||
+                    verified->reference_timestamp -
+                            groups.back().reference_t_max >
+                        2.0) {
+                    NeighborhoodDiagnostic group;
+                    group.reference_t_min =
+                        verified->reference_timestamp;
+                    group.reference_t_max =
+                        verified->reference_timestamp;
+                    group.reference_frame_min =
+                        verified->reference_frame_id;
+                    group.reference_frame_max =
+                        verified->reference_frame_id;
+                    groups.emplace_back(group);
+                }
+
+                NeighborhoodDiagnostic &group =
+                    groups.back();
+                group.reference_t_min =
+                    std::min(
+                        group.reference_t_min,
+                        verified->reference_timestamp);
+                group.reference_t_max =
+                    std::max(
+                        group.reference_t_max,
+                        verified->reference_timestamp);
+                group.reference_frame_min =
+                    std::min(
+                        group.reference_frame_min,
+                        verified->reference_frame_id);
+                group.reference_frame_max =
+                    std::max(
+                        group.reference_frame_max,
+                        verified->reference_frame_id);
+                ++group.member_count;
+                group.best_rank =
+                    std::min(
+                        group.best_rank,
+                        verified->rank);
+                group.best_distance =
+                    std::min(
+                        group.best_distance,
+                        verified->distance);
+                group.max_inliers =
+                    std::max(
+                        group.max_inliers,
+                        verified->inlier_count);
+                group.max_inlier_ratio =
+                    std::max(
+                        group.max_inlier_ratio,
+                        verified->inlier_ratio);
+                group.min_abs_timestamp_separation =
+                    std::min(
+                        group.min_abs_timestamp_separation,
+                        verified->abs_timestamp_separation);
+            }
+            return groups;
+        };
+
+    const auto assign_event_persistence =
+        [this, frame](
+            std::vector<NeighborhoodDiagnostic> &groups,
+            const std::vector<
+                PlaceNeighborhoodEventShadowState> &previous) {
+            std::vector<char> previous_used(
+                previous.size(), 0);
+            std::vector<PlaceNeighborhoodEventShadowState>
+                next;
+            next.reserve(groups.size());
+
+            const auto interval_gap =
+                [](double a_min, double a_max,
+                   double b_min, double b_max) {
+                    if (a_max < b_min)
+                        return b_min - a_max;
+                    if (b_max < a_min)
+                        return a_min - b_max;
+                    return 0.0;
+                };
+
+            for (NeighborhoodDiagnostic &group : groups) {
+                size_t best_previous = previous.size();
+                double best_gap =
+                    std::numeric_limits<double>::infinity();
+                double best_center_delta =
+                    std::numeric_limits<double>::infinity();
+                const double group_center =
+                    0.5 *
+                    (group.reference_t_min +
+                     group.reference_t_max);
+
+                for (size_t i = 0;
+                     i < previous.size();
+                     ++i) {
+                    if (previous_used[i])
+                        continue;
+
+                    const double gap =
+                        interval_gap(
+                            group.reference_t_min,
+                            group.reference_t_max,
+                            previous[i].reference_t_min,
+                            previous[i].reference_t_max);
+                    if (gap > 2.0)
+                        continue;
+
+                    const double previous_center =
+                        0.5 *
+                        (previous[i].reference_t_min +
+                         previous[i].reference_t_max);
+                    const double center_delta =
+                        std::abs(
+                            group_center -
+                            previous_center);
+                    if (gap < best_gap ||
+                        (gap == best_gap &&
+                         center_delta <
+                             best_center_delta)) {
+                        best_previous = i;
+                        best_gap = gap;
+                        best_center_delta = center_delta;
+                    }
+                }
+
+                if (best_previous < previous.size()) {
+                    const auto &matched =
+                        previous[best_previous];
+                    previous_used[best_previous] = 1;
+                    group.event_id = matched.event_id;
+                    group.consecutive_age =
+                        matched.consecutive_age + 1;
+                    group.persisted_from_previous = true;
+                    group.previous_current_frame_id =
+                        matched.last_current_frame_id;
+                    group.current_frame_gap =
+                        frame->id() >=
+                                matched.last_current_frame_id
+                            ? frame->id() -
+                                  matched.last_current_frame_id
+                            : matched.last_current_frame_id -
+                                  frame->id();
+                } else {
+                    group.event_id =
+                        next_place_neighborhood_event_id_++;
+                }
+
+                PlaceNeighborhoodEventShadowState state;
+                state.event_id = group.event_id;
+                state.reference_t_min =
+                    group.reference_t_min;
+                state.reference_t_max =
+                    group.reference_t_max;
+                state.consecutive_age =
+                    group.consecutive_age;
+                state.last_current_frame_id =
+                    frame->id();
+                next.emplace_back(state);
+            }
+
+            return next;
+        };
+
+    const auto log_neighborhoods =
+        [frame](
+            double threshold_s,
+            const std::vector<NeighborhoodDiagnostic> &groups) {
+            size_t persistent_groups = 0;
+            size_t max_consecutive_age = 0;
+            size_t total_members = 0;
+            for (const auto &group : groups) {
+                if (group.persisted_from_previous)
+                    ++persistent_groups;
+                max_consecutive_age =
+                    std::max(
+                        max_consecutive_age,
+                        group.consecutive_age);
+                total_members += group.member_count;
+            }
+
+            std::fprintf(
+                stderr,
+                "[PlaceNeighborhoodSetShadow] "
+                "current=%zu t=%.9f threshold_s=%.1f "
+                "group_count=%zu persistent_group_count=%zu "
+                "max_consecutive_age=%zu member_count=%zu "
+                "neighborhood_gap_s=2.000 "
+                "policy_applied=0 temporal_excluded=0 "
+                "state_mutation=0\n",
+                frame->id(), frame->image->t,
+                threshold_s,
+                groups.size(),
+                persistent_groups,
+                max_consecutive_age,
+                total_members);
+
+            for (size_t i = 0;
+                 i < groups.size();
+                 ++i) {
+                const auto &group = groups[i];
+                std::fprintf(
+                    stderr,
+                    "[PlaceNeighborhoodEventShadow] "
+                    "current=%zu t=%.9f threshold_s=%.1f "
+                    "group_index=%zu event_id=%zu "
+                    "member_count=%zu "
+                    "reference_t_min=%.9f "
+                    "reference_t_max=%.9f "
+                    "reference_frame_min=%zu "
+                    "reference_frame_max=%zu "
+                    "best_rank=%zu best_distance=%.9f "
+                    "max_inliers=%zu "
+                    "max_inlier_ratio=%.6f "
+                    "min_abs_timestamp_separation=%.9f "
+                    "persisted_from_previous=%d "
+                    "consecutive_age=%zu "
+                    "previous_current=%zu "
+                    "current_frame_gap=%zu "
+                    "neighborhood_gap_s=2.000 "
+                    "policy_applied=0 temporal_excluded=0 "
+                    "state_mutation=0\n",
+                    frame->id(), frame->image->t,
+                    threshold_s,
+                    i,
+                    group.event_id,
+                    group.member_count,
+                    group.reference_t_min,
+                    group.reference_t_max,
+                    group.reference_frame_min,
+                    group.reference_frame_max,
+                    group.best_rank,
+                    group.best_distance,
+                    group.max_inliers,
+                    group.max_inlier_ratio,
+                    group.min_abs_timestamp_separation,
+                    group.persisted_from_previous ? 1 : 0,
+                    group.consecutive_age,
+                    group.previous_current_frame_id,
+                    group.current_frame_gap);
+            }
+        };
+
+    std::vector<NeighborhoodDiagnostic> dt5_neighborhoods =
+        build_neighborhoods(5.0);
+    std::vector<NeighborhoodDiagnostic> dt10_neighborhoods =
+        build_neighborhoods(10.0);
+
+    std::vector<PlaceNeighborhoodEventShadowState>
+        next_dt5_neighborhood_events =
+            assign_event_persistence(
+                dt5_neighborhoods,
+                previous_dt5_neighborhood_events_);
+    std::vector<PlaceNeighborhoodEventShadowState>
+        next_dt10_neighborhood_events =
+            assign_event_persistence(
+                dt10_neighborhoods,
+                previous_dt10_neighborhood_events_);
+
+    log_neighborhoods(5.0, dt5_neighborhoods);
+    log_neighborhoods(10.0, dt10_neighborhoods);
+
+    previous_dt5_neighborhood_events_ =
+        std::move(next_dt5_neighborhood_events);
+    previous_dt10_neighborhood_events_ =
+        std::move(next_dt10_neighborhood_events);
 
     const size_t invalid_frame_id =
         static_cast<size_t>(-1);
