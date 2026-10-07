@@ -7,6 +7,10 @@
 #include <xrslam/extra/eigenplaces_descriptor_extractor.h>
 #endif
 
+#if defined(XRSLAM_HAS_USEARCH)
+#include <xrslam/extra/usearch_place_database.h>
+#endif
+
 #include <cstdlib>
 #include <stdexcept>
 
@@ -95,19 +99,29 @@ static const unsigned char logo_ascii[] = {
 void XRSLAMManager::Init(std::shared_ptr<Config> config) {
     std::shared_ptr<PlaceDescriptorExtractor>
         place_descriptor_extractor;
+    std::shared_ptr<PlaceDatabase> place_database;
     std::shared_ptr<LocalDescriptorExtractor>
         local_descriptor_extractor;
 
     const char *descriptor_shadow =
         std::getenv("XRSLAM_PLACE_DESCRIPTOR_SHADOW");
-    if (descriptor_shadow &&
-        std::string(descriptor_shadow) == "1") {
+    const char *retrieval_shadow =
+        std::getenv("XRSLAM_PLACE_RETRIEVAL_SHADOW");
+    const bool retrieval_enabled =
+        retrieval_shadow &&
+        std::string(retrieval_shadow) == "1";
+    const bool descriptor_enabled =
+        (descriptor_shadow &&
+         std::string(descriptor_shadow) == "1") ||
+        retrieval_enabled;
+
+    if (descriptor_enabled) {
 #if defined(XRSLAM_HAS_EIGENPLACES)
         const char *model_path =
             std::getenv("XRSLAM_EIGENPLACES_MODEL");
         if (!model_path || model_path[0] == '\0') {
             throw std::runtime_error(
-                "XRSLAM_PLACE_DESCRIPTOR_SHADOW=1 requires "
+                "place descriptor/retrieval shadow requires "
                 "XRSLAM_EIGENPLACES_MODEL");
         }
 
@@ -117,8 +131,19 @@ void XRSLAMManager::Init(std::shared_ptr<Config> config) {
                 model_path, false);
 #else
         throw std::runtime_error(
-            "XRSLAM_PLACE_DESCRIPTOR_SHADOW=1 requires a build "
+            "place descriptor/retrieval shadow requires a build "
             "configured with XRSLAM_ENABLE_EIGENPLACES=ON");
+#endif
+    }
+
+    if (retrieval_enabled) {
+#if defined(XRSLAM_HAS_USEARCH)
+        place_database =
+            xrslam::extra::make_usearch_place_database();
+#else
+        throw std::runtime_error(
+            "XRSLAM_PLACE_RETRIEVAL_SHADOW=1 requires a build "
+            "configured with XRSLAM_ENABLE_USEARCH=ON");
 #endif
     }
 
@@ -142,6 +167,8 @@ void XRSLAMManager::Init(std::shared_ptr<Config> config) {
     detail_ = std::make_unique<XRSLAM::Detail>(config);
     detail_->set_place_descriptor_extractor(
         std::move(place_descriptor_extractor));
+    detail_->set_place_database(
+        std::move(place_database));
     detail_->set_local_descriptor_extractor(
         std::move(local_descriptor_extractor));
     config_ = config;

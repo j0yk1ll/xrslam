@@ -33,10 +33,47 @@ bool learned_recovery_shadow_enabled() {
     return value && std::string(value) == "1";
 }
 
+bool place_retrieval_shadow_enabled() {
+    const char *value =
+        std::getenv("XRSLAM_PLACE_RETRIEVAL_SHADOW");
+    return value && std::string(value) == "1";
+}
+
 bool place_descriptor_shadow_enabled() {
     const char *value =
         std::getenv("XRSLAM_PLACE_DESCRIPTOR_SHADOW");
-    return value && std::string(value) == "1";
+    return (value && std::string(value) == "1") ||
+           place_retrieval_shadow_enabled();
+}
+
+size_t place_retrieval_top_k() {
+    constexpr size_t default_top_k = 20;
+
+    const char *value =
+        std::getenv("XRSLAM_PLACE_RETRIEVAL_TOP_K");
+    if (!value || value[0] == '\0')
+        return default_top_k;
+
+    char *end = nullptr;
+    const unsigned long long parsed =
+        std::strtoull(value, &end, 10);
+    if (end == value || *end != '\0' || parsed == 0 ||
+        parsed >
+            static_cast<unsigned long long>(
+                std::numeric_limits<size_t>::max())) {
+        static bool warned = false;
+        if (!warned) {
+            std::fprintf(
+                stderr,
+                "[PlaceRetrievalShadow] invalid "
+                "XRSLAM_PLACE_RETRIEVAL_TOP_K=%s; using %zu\n",
+                value, default_top_k);
+            warned = true;
+        }
+        return default_top_k;
+    }
+
+    return static_cast<size_t>(parsed);
 }
 
 bool orb_pnp_shadow_enabled() {
@@ -1124,6 +1161,13 @@ void SlidingWindowTracker::extract_place_descriptors() {
         return;
     }
 
+    const bool retrieval_enabled =
+        place_retrieval_shadow_enabled();
+    PlaceDatabase *database =
+        retrieval_enabled ? detail->place_database() : nullptr;
+    const size_t retrieval_top_k =
+        retrieval_enabled ? place_retrieval_top_k() : 0;
+
     for (size_t i = 0; i < map->frame_num(); ++i) {
         Frame *frame = map->get_frame(i);
         if (!frame || !frame->tag(FT_KEYFRAME) || !frame->image)
@@ -1181,6 +1225,126 @@ void SlidingWindowTracker::extract_place_descriptors() {
             place_keyframe.frame_id = frame->id();
             place_keyframe.timestamp = frame->image->t;
             place_keyframe.descriptor = std::move(descriptor);
+
+            bool database_compatible = false;
+            size_t database_size_before = 0;
+            std::vector<PlaceCandidate> candidates;
+            double query_ms = 0.0;
+
+            if (retrieval_enabled) {
+                if (!database) {
+                    std::fprintf(
+                        stderr,
+                        "[PlaceRetrievalShadow] current=%zu t=%.9f "
+                        "reject=no_database state_mutation=0\n",
+                        frame->id(), frame->image->t);
+                } else if (database->dimension() != dimension) {
+                    std::fprintf(
+                        stderr,
+                        "[PlaceRetrievalShadow] current=%zu t=%.9f "
+                        "reject=database_dimension_mismatch "
+                        "descriptor_dimension=%zu database_dimension=%zu "
+                        "state_mutation=0\n",
+                        frame->id(), frame->image->t,
+                        dimension, database->dimension());
+                } else {
+                    database_compatible = true;
+                    database_size_before = database->size();
+
+                    const auto query_begin =
+                        std::chrono::steady_clock::now();
+                    candidates = database->search(
+                        place_keyframe.descriptor,
+                        retrieval_top_k);
+                    query_ms =
+                        std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() -
+                            query_begin)
+                            .count();
+
+                    for (size_t rank = 0;
+                         rank < candidates.size();
+                         ++rank) {
+                        const PlaceCandidate &candidate =
+                            candidates[rank];
+                        const PlaceKeyframe *historical =
+                            place_keyframes_.find(candidate.key);
+                        if (!historical) {
+                            std::fprintf(
+                                stderr,
+                                "[PlaceRetrievalShadow] current=%zu "
+                                "t=%.9f rank=%zu key=%llu "
+                                "distance=%.9f metadata_found=0 "
+                                "temporal_excluded=0\n",
+                                frame->id(), frame->image->t,
+                                rank,
+                                static_cast<unsigned long long>(
+                                    candidate.key),
+                                candidate.distance);
+                            continue;
+                        }
+
+                        const size_t frame_separation =
+                            frame->id() >= historical->frame_id
+                                ? frame->id() -
+                                      historical->frame_id
+                                : historical->frame_id -
+                                      frame->id();
+                        const double timestamp_separation =
+                            frame->image->t -
+                            historical->timestamp;
+
+                        std::fprintf(
+                            stderr,
+                            "[PlaceRetrievalShadow] current=%zu "
+                            "t=%.9f rank=%zu key=%llu "
+                            "candidate_frame_id=%zu "
+                            "distance=%.9f candidate_t=%.9f "
+                            "frame_separation=%zu "
+                            "timestamp_separation=%.9f "
+                            "metadata_found=1 temporal_excluded=0\n",
+                            frame->id(), frame->image->t,
+                            rank,
+                            static_cast<unsigned long long>(
+                                candidate.key),
+                            historical->frame_id,
+                            candidate.distance,
+                            historical->timestamp,
+                            frame_separation,
+                            timestamp_separation);
+                    }
+                }
+            }
+
+            if (database_compatible) {
+                const auto index_begin =
+                    std::chrono::steady_clock::now();
+                const bool index_success =
+                    database->add(
+                        key, place_keyframe.descriptor);
+                const double index_ms =
+                    std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() -
+                        index_begin)
+                        .count();
+
+                std::fprintf(
+                    stderr,
+                    "[PlaceRetrievalShadow] current=%zu t=%.9f "
+                    "database_size=%zu top_k=%zu "
+                    "query_success=1 candidate_count=%zu "
+                    "query_ms=%.3f index_success=%d "
+                    "database_size_after=%zu index_ms=%.3f "
+                    "state_mutation=0\n",
+                    frame->id(), frame->image->t,
+                    database_size_before, retrieval_top_k,
+                    candidates.size(), query_ms,
+                    index_success ? 1 : 0,
+                    database->size(), index_ms);
+
+                if (!index_success)
+                    continue;
+            }
 
             if (!place_keyframes_.add(place_keyframe)) {
                 std::fprintf(

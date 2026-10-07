@@ -89,6 +89,18 @@ int main() {
     if (!database.search(empty_query, 5).empty())
         return fail("empty database returned candidates");
 
+    xrslam::extra::USearchPlaceDatabase growing_database;
+    if (!growing_database.add(1, empty_query) ||
+        growing_database.size() != 1) {
+        return fail("automatic capacity growth failed on first insertion");
+    }
+    const auto growing_top1 =
+        growing_database.search(empty_query, 1);
+    if (growing_top1.size() != 1 ||
+        candidate_id(growing_top1[0]) != 1) {
+        return fail("automatic capacity growth produced an invalid index");
+    }
+
     database.reserve(8);
 
     const auto a = make_descriptor(1.0f, 0.0f);

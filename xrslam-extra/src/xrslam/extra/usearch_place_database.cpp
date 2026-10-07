@@ -1,6 +1,7 @@
 #include <xrslam/extra/usearch_place_database.h>
 
 #include <algorithm>
+#include <limits>
 #include <stdexcept>
 #include <unordered_set>
 #include <utility>
@@ -71,6 +72,24 @@ bool USearchPlaceDatabase::add(
         return false;
     if (impl_->frame_ids.find(frame_id) != impl_->frame_ids.end())
         return false;
+
+    if (impl_->index.size() >= impl_->index.capacity()) {
+        const size_t current_capacity =
+            impl_->index.capacity();
+        const size_t max_capacity =
+            std::numeric_limits<size_t>::max();
+        const size_t next_capacity =
+            current_capacity == 0
+                ? 64
+                : (current_capacity <= max_capacity / 2
+                       ? current_capacity * 2
+                       : max_capacity);
+        if (next_capacity <= current_capacity ||
+            !impl_->index.try_reserve(next_capacity)) {
+            return false;
+        }
+        impl_->frame_ids.reserve(next_capacity);
+    }
 
     auto result = impl_->index.add(frame_id, descriptor.values.data());
     if (!result)

@@ -14,6 +14,7 @@ class Image;
 class Map;
 class LocalDescriptorExtractor;
 class PlaceDescriptorExtractor;
+class PlaceDatabase;
 class Synchronizer;
 
 struct XRSLAM::Detail {
@@ -35,6 +36,9 @@ struct XRSLAM::Detail {
     void set_place_descriptor_extractor(
         std::shared_ptr<PlaceDescriptorExtractor> extractor);
     PlaceDescriptorExtractor *place_descriptor_extractor() const;
+
+    void set_place_database(std::shared_ptr<PlaceDatabase> database);
+    PlaceDatabase *place_database() const;
 
     void set_local_descriptor_extractor(
         std::shared_ptr<LocalDescriptorExtractor> extractor);
@@ -77,6 +81,7 @@ struct XRSLAM::Detail {
     std::deque<std::unique_ptr<Frame>> frames;
     std::deque<ImuData> frontal_imus;
 
+    std::shared_ptr<PlaceDatabase> place_database_;
     std::shared_ptr<PlaceDescriptorExtractor> place_descriptor_extractor_;
     std::shared_ptr<LocalDescriptorExtractor> local_descriptor_extractor_;
     std::shared_ptr<Config> config;

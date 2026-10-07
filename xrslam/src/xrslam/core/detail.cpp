@@ -56,6 +56,15 @@ XRSLAM::Detail::place_descriptor_extractor() const {
     return place_descriptor_extractor_.get();
 }
 
+void XRSLAM::Detail::set_place_database(
+    std::shared_ptr<PlaceDatabase> database) {
+    place_database_ = std::move(database);
+}
+
+PlaceDatabase *XRSLAM::Detail::place_database() const {
+    return place_database_.get();
+}
+
 void XRSLAM::Detail::set_local_descriptor_extractor(
     std::shared_ptr<LocalDescriptorExtractor> extractor) {
     local_descriptor_extractor_ = std::move(extractor);
@@ -158,6 +167,8 @@ Pose XRSLAM::Detail::track_camera(std::shared_ptr<Image> image) {
         std::getenv("XRSLAM_PLACE_IMAGE_SHADOW");
     const char *place_descriptor_shadow =
         std::getenv("XRSLAM_PLACE_DESCRIPTOR_SHADOW");
+    const char *place_retrieval_shadow =
+        std::getenv("XRSLAM_PLACE_RETRIEVAL_SHADOW");
     const char *local_descriptor_shadow =
         std::getenv("XRSLAM_LOCAL_DESCRIPTOR_SHADOW");
     const char *orb_association_shadow =
@@ -169,6 +180,8 @@ Pose XRSLAM::Detail::track_camera(std::shared_ptr<Image> image) {
          std::string(place_image_shadow) == "1") ||
         (place_descriptor_shadow &&
          std::string(place_descriptor_shadow) == "1") ||
+        (place_retrieval_shadow &&
+         std::string(place_retrieval_shadow) == "1") ||
         (local_descriptor_shadow &&
          std::string(local_descriptor_shadow) == "1") ||
         (orb_association_shadow &&
