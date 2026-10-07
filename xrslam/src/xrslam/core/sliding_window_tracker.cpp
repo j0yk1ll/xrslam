@@ -585,7 +585,15 @@ void SlidingWindowTracker::archive_optimized_keyframes() {
                     place_keyframes_.find(
                         static_cast<PlaceKey>(
                             frame->id()));
-                if (place_ready) {
+                const bool retrieval_verification_pending =
+                    std::any_of(
+                        pending_place_retrieval_candidates_.begin(),
+                        pending_place_retrieval_candidates_.end(),
+                        [frame](const PendingPlaceRetrieval &pending) {
+                            return pending.frame_id == frame->id();
+                        });
+                if (place_ready &&
+                    !retrieval_verification_pending) {
                     frame->image
                         ->retain_place_recognition_source(
                             false);
@@ -1143,6 +1151,693 @@ void SlidingWindowTracker::diagnose_orb_association(
     }
 }
 
+void SlidingWindowTracker::diagnose_retrieved_place_candidates(
+    Frame *frame,
+    const std::vector<PlaceCandidate> &candidates) {
+    if (!place_retrieval_shadow_enabled() ||
+        !orb_pnp_shadow_enabled() ||
+        !frame || !frame->image || !detail ||
+        candidates.empty()) {
+        return;
+    }
+
+    LocalDescriptorExtractor *extractor =
+        detail->local_descriptor_extractor();
+    if (!extractor ||
+        extractor->type() !=
+            LocalDescriptorType::BINARY_U8) {
+        std::fprintf(
+            stderr,
+            "[PlaceRetrievalVerificationShadow] current=%zu "
+            "reject=binary_extractor_unavailable "
+            "state_mutation=0\n",
+            frame->id());
+        return;
+    }
+
+    std::vector<vector<2>> current_points;
+    current_points.reserve(frame->keypoint_num());
+    for (size_t keypoint_index = 0;
+         keypoint_index < frame->keypoint_num();
+         ++keypoint_index) {
+        const vector<2> pixel =
+            apply_k(
+                frame->get_keypoint(keypoint_index),
+                frame->K);
+        if (pixel.allFinite())
+            current_points.emplace_back(pixel);
+    }
+
+    const auto extract_begin =
+        std::chrono::steady_clock::now();
+    LocalDescriptorSet current_descriptors;
+    double extract_ms = 0.0;
+    try {
+        current_descriptors =
+            extractor->extract(
+                *frame->image, current_points);
+        extract_ms =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() -
+                extract_begin)
+                .count();
+    } catch (const std::exception &e) {
+        std::fprintf(
+            stderr,
+            "[PlaceRetrievalVerificationShadow] current=%zu "
+            "t=%.9f candidate_count=%zu "
+            "reject=extract_exception error=%s "
+            "state_mutation=0\n",
+            frame->id(), frame->image->t,
+            candidates.size(), e.what());
+        return;
+    }
+
+    if (!current_descriptors.valid() ||
+        current_descriptors.type !=
+            LocalDescriptorType::BINARY_U8 ||
+        current_descriptors.dimension !=
+            extractor->dimension() ||
+        current_descriptors.size() == 0) {
+        std::fprintf(
+            stderr,
+            "[PlaceRetrievalVerificationShadow] current=%zu "
+            "t=%.9f candidate_count=%zu "
+            "reject=current_descriptors_invalid "
+            "current_keypoints=%zu current_points=%zu "
+            "current_descriptors=%zu dimension=%zu "
+            "extract_ms=%.3f state_mutation=0\n",
+            frame->id(), frame->image->t,
+            candidates.size(),
+            frame->keypoint_num(),
+            current_points.size(),
+            current_descriptors.size(),
+            current_descriptors.dimension,
+            extract_ms);
+        return;
+    }
+
+    constexpr size_t min_correspondences = 6;
+    constexpr size_t min_verified_inliers = 8;
+    constexpr double min_verified_inlier_ratio = 0.50;
+    const size_t pnp_max_hamming =
+        orb_pnp_max_hamming();
+    const matrix<3> K_inv = frame->K.inverse();
+
+    for (size_t rank = 0;
+         rank < candidates.size();
+         ++rank) {
+        const PlaceCandidate &candidate =
+            candidates[rank];
+        const PlaceKeyframe *historical =
+            place_keyframes_.find(candidate.key);
+        if (!historical) {
+            std::fprintf(
+                stderr,
+                "[PlaceRetrievalVerificationShadow] current=%zu "
+                "t=%.9f rank=%zu key=%llu distance=%.9f "
+                "reject=metadata_unavailable temporal_excluded=0 "
+                "state_mutation=0\n",
+                frame->id(), frame->image->t,
+                rank,
+                static_cast<unsigned long long>(
+                    candidate.key),
+                candidate.distance);
+            continue;
+        }
+
+        const size_t reference_frame_id =
+            historical->frame_id;
+        const size_t frame_separation =
+            frame->id() >= reference_frame_id
+                ? frame->id() - reference_frame_id
+                : reference_frame_id - frame->id();
+        const double timestamp_separation =
+            frame->image->t -
+            historical->timestamp;
+
+        const ArchivedKeyframe *reference =
+            keyframe_archive_.get(reference_frame_id);
+        if (!reference) {
+            std::fprintf(
+                stderr,
+                "[PlaceRetrievalVerificationShadow] current=%zu "
+                "t=%.9f rank=%zu key=%llu "
+                "candidate_frame_id=%zu candidate_t=%.9f "
+                "distance=%.9f frame_separation=%zu "
+                "timestamp_separation=%.9f "
+                "reject=reference_not_archived "
+                "temporal_excluded=0 state_mutation=0\n",
+                frame->id(), frame->image->t,
+                rank,
+                static_cast<unsigned long long>(
+                    candidate.key),
+                reference_frame_id,
+                historical->timestamp,
+                candidate.distance,
+                frame_separation,
+                timestamp_separation);
+            continue;
+        }
+
+        if (!reference->local_descriptors_complete ||
+            !reference->local_descriptors.valid() ||
+            reference->local_descriptors.type !=
+                LocalDescriptorType::BINARY_U8 ||
+            reference->local_descriptors.dimension !=
+                current_descriptors.dimension) {
+            std::fprintf(
+                stderr,
+                "[PlaceRetrievalVerificationShadow] current=%zu "
+                "t=%.9f rank=%zu key=%llu "
+                "candidate_frame_id=%zu candidate_t=%.9f "
+                "distance=%.9f frame_separation=%zu "
+                "timestamp_separation=%.9f "
+                "reject=reference_descriptors_unavailable "
+                "temporal_excluded=0 state_mutation=0\n",
+                frame->id(), frame->image->t,
+                rank,
+                static_cast<unsigned long long>(
+                    candidate.key),
+                reference_frame_id,
+                historical->timestamp,
+                candidate.distance,
+                frame_separation,
+                timestamp_separation);
+            continue;
+        }
+
+        if (reference->local_descriptors.size() == 0) {
+            std::fprintf(
+                stderr,
+                "[PlaceRetrievalVerificationShadow] current=%zu "
+                "t=%.9f rank=%zu key=%llu "
+                "candidate_frame_id=%zu candidate_t=%.9f "
+                "distance=%.9f frame_separation=%zu "
+                "timestamp_separation=%.9f "
+                "skip=reference_empty temporal_excluded=0 "
+                "geometrically_verified=0 state_mutation=0\n",
+                frame->id(), frame->image->t,
+                rank,
+                static_cast<unsigned long long>(
+                    candidate.key),
+                reference_frame_id,
+                historical->timestamp,
+                candidate.distance,
+                frame_separation,
+                timestamp_separation);
+            continue;
+        }
+
+        const auto match_begin =
+            std::chrono::steady_clock::now();
+        const LocalDescriptorMatchResult matches =
+            match_binary_descriptors_mutual_nn(
+                reference->local_descriptors,
+                current_descriptors);
+        const double match_ms =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() -
+                match_begin)
+                .count();
+
+        std::vector<vector<3>> pnp_points_world;
+        std::vector<vector<2>> pnp_points_normalized;
+        std::vector<vector<2>> pnp_points_pixel;
+        size_t mapped_2d3d = 0;
+        size_t pnp_hamming_filtered = 0;
+        pnp_points_world.reserve(
+            matches.mutual_matches.size());
+        pnp_points_normalized.reserve(
+            matches.mutual_matches.size());
+        pnp_points_pixel.reserve(
+            matches.mutual_matches.size());
+
+        for (const auto &match :
+             matches.mutual_matches) {
+            if (match.reference_descriptor_index >=
+                    reference->local_descriptors
+                        .source_indices.size() ||
+                match.current_descriptor_index >=
+                    current_descriptors
+                        .source_indices.size()) {
+                continue;
+            }
+
+            const size_t observation_index =
+                reference->local_descriptors
+                    .source_indices[
+                        match.reference_descriptor_index];
+            const size_t current_point_index =
+                current_descriptors
+                    .source_indices[
+                        match.current_descriptor_index];
+            if (observation_index >=
+                    reference->observations.size() ||
+                current_point_index >=
+                    current_points.size()) {
+                continue;
+            }
+
+            const vector<3> &landmark_world =
+                reference->observations[
+                    observation_index].landmark_world;
+            const vector<2> &pixel =
+                current_points[current_point_index];
+            const vector<3> normalized_h =
+                K_inv *
+                vector<3>{pixel.x(), pixel.y(), 1.0};
+            if (!landmark_world.allFinite() ||
+                !normalized_h.allFinite() ||
+                std::abs(normalized_h.z()) <= 1.0e-12) {
+                continue;
+            }
+
+            ++mapped_2d3d;
+            if (match.distance > pnp_max_hamming) {
+                ++pnp_hamming_filtered;
+                continue;
+            }
+
+            pnp_points_world.emplace_back(landmark_world);
+            pnp_points_normalized.emplace_back(
+                normalized_h.hnormalized());
+            pnp_points_pixel.emplace_back(pixel);
+        }
+
+        const HammingDistanceStats raw_stats =
+            hamming_distance_stats(
+                matches.nearest_neighbors);
+        const HammingDistanceStats mutual_stats =
+            hamming_distance_stats(
+                matches.mutual_matches);
+        const size_t correspondence_count =
+            pnp_points_world.size();
+
+        if (correspondence_count <
+            min_correspondences) {
+            std::fprintf(
+                stderr,
+                "[PlaceRetrievalVerificationShadow] "
+                "current=%zu t=%.9f rank=%zu key=%llu "
+                "candidate_frame_id=%zu candidate_t=%.9f "
+                "distance=%.9f frame_separation=%zu "
+                "timestamp_separation=%.9f "
+                "reference_observations=%zu "
+                "reference_descriptors=%zu "
+                "current_keypoints=%zu current_points=%zu "
+                "current_descriptors=%zu "
+                "raw_nn=%zu mutual=%zu mapped_2d3d=%zu "
+                "hamming_filtered=%zu correspondences=%zu "
+                "raw_hamming_min=%zu raw_hamming_median=%zu "
+                "raw_hamming_max=%zu "
+                "mutual_hamming_min=%zu "
+                "mutual_hamming_median=%zu "
+                "mutual_hamming_max=%zu "
+                "extract_ms=%.3f match_ms=%.3f pnp_ms=0.000 "
+                "max_hamming=%zu min_inliers=%zu "
+                "min_inlier_ratio=%.6f "
+                "skip=insufficient_correspondences "
+                "temporal_excluded=0 geometrically_verified=0 "
+                "state_mutation=0\n",
+                frame->id(), frame->image->t,
+                rank,
+                static_cast<unsigned long long>(
+                    candidate.key),
+                reference_frame_id,
+                historical->timestamp,
+                candidate.distance,
+                frame_separation,
+                timestamp_separation,
+                reference->observations.size(),
+                reference->local_descriptors.size(),
+                frame->keypoint_num(),
+                current_points.size(),
+                current_descriptors.size(),
+                matches.nearest_neighbors.size(),
+                matches.mutual_matches.size(),
+                mapped_2d3d,
+                pnp_hamming_filtered,
+                correspondence_count,
+                raw_stats.min, raw_stats.median,
+                raw_stats.max,
+                mutual_stats.min, mutual_stats.median,
+                mutual_stats.max,
+                extract_ms, match_ms,
+                pnp_max_hamming,
+                min_verified_inliers,
+                min_verified_inlier_ratio);
+            continue;
+        }
+
+        const auto pnp_begin =
+            std::chrono::steady_clock::now();
+        try {
+            std::vector<char> inlier_mask;
+            const double pnp_noise_sigma_norm =
+                1.0 / frame->K(0, 0);
+            const matrix<4> T_cw =
+                find_pnp_matrix(
+                    pnp_points_world,
+                    pnp_points_normalized,
+                    inlier_mask,
+                    pnp_noise_sigma_norm);
+            const double pnp_ms =
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() -
+                    pnp_begin)
+                    .count();
+
+            if (inlier_mask.size() !=
+                correspondence_count) {
+                std::fprintf(
+                    stderr,
+                    "[PlaceRetrievalVerificationShadow] "
+                    "current=%zu t=%.9f rank=%zu key=%llu "
+                    "candidate_frame_id=%zu candidate_t=%.9f "
+                    "distance=%.9f frame_separation=%zu "
+                    "timestamp_separation=%.9f "
+                    "raw_nn=%zu mutual=%zu mapped_2d3d=%zu "
+                    "hamming_filtered=%zu correspondences=%zu "
+                    "mask_size=%zu extract_ms=%.3f "
+                    "match_ms=%.3f pnp_ms=%.3f "
+                    "max_hamming=%zu min_inliers=%zu "
+                    "min_inlier_ratio=%.6f "
+                    "reject=invalid_inlier_mask "
+                    "temporal_excluded=0 geometrically_verified=0 "
+                    "state_mutation=0\n",
+                    frame->id(), frame->image->t,
+                    rank,
+                    static_cast<unsigned long long>(
+                        candidate.key),
+                    reference_frame_id,
+                    historical->timestamp,
+                    candidate.distance,
+                    frame_separation,
+                    timestamp_separation,
+                    matches.nearest_neighbors.size(),
+                    matches.mutual_matches.size(),
+                    mapped_2d3d,
+                    pnp_hamming_filtered,
+                    correspondence_count,
+                    inlier_mask.size(),
+                    extract_ms, match_ms, pnp_ms,
+                    pnp_max_hamming,
+                    min_verified_inliers,
+                    min_verified_inlier_ratio);
+                continue;
+            }
+
+            size_t inlier_count = 0;
+            for (char inlier : inlier_mask) {
+                if (inlier)
+                    ++inlier_count;
+            }
+            const double inlier_ratio =
+                static_cast<double>(inlier_count) /
+                static_cast<double>(
+                    correspondence_count);
+
+            if (inlier_count <
+                    min_correspondences ||
+                !T_cw.allFinite()) {
+                std::fprintf(
+                    stderr,
+                    "[PlaceRetrievalVerificationShadow] "
+                    "current=%zu t=%.9f rank=%zu key=%llu "
+                    "candidate_frame_id=%zu candidate_t=%.9f "
+                    "distance=%.9f frame_separation=%zu "
+                    "timestamp_separation=%.9f "
+                    "raw_nn=%zu mutual=%zu mapped_2d3d=%zu "
+                    "hamming_filtered=%zu correspondences=%zu "
+                    "inliers=%zu inlier_ratio=%.6f "
+                    "pose_finite=0 extract_ms=%.3f "
+                    "match_ms=%.3f pnp_ms=%.3f "
+                    "pnp_threshold_parameter_px=1.000 "
+                    "max_hamming=%zu min_inliers=%zu "
+                    "min_inlier_ratio=%.6f "
+                    "reject=invalid_pose "
+                    "temporal_excluded=0 geometrically_verified=0 "
+                    "state_mutation=0\n",
+                    frame->id(), frame->image->t,
+                    rank,
+                    static_cast<unsigned long long>(
+                        candidate.key),
+                    reference_frame_id,
+                    historical->timestamp,
+                    candidate.distance,
+                    frame_separation,
+                    timestamp_separation,
+                    matches.nearest_neighbors.size(),
+                    matches.mutual_matches.size(),
+                    mapped_2d3d,
+                    pnp_hamming_filtered,
+                    correspondence_count,
+                    inlier_count,
+                    inlier_ratio,
+                    extract_ms, match_ms, pnp_ms,
+                    pnp_max_hamming,
+                    min_verified_inliers,
+                    min_verified_inlier_ratio);
+                continue;
+            }
+
+            const matrix<3> R_cw =
+                T_cw.block<3, 3>(0, 0);
+            const vector<3> t_cw =
+                T_cw.block<3, 1>(0, 3);
+            const matrix<3> R_wc =
+                R_cw.transpose();
+
+            PoseState pnp_camera_pose;
+            pnp_camera_pose.q =
+                quaternion(R_wc);
+            pnp_camera_pose.q.normalize();
+            pnp_camera_pose.p =
+                -R_wc * t_cw;
+
+            double inlier_squared_error = 0.0;
+            size_t positive_depth_inliers = 0;
+            for (size_t i = 0;
+                 i < correspondence_count;
+                 ++i) {
+                if (!inlier_mask[i])
+                    continue;
+
+                const vector<3> point_camera =
+                    R_cw * pnp_points_world[i] +
+                    t_cw;
+                if (!point_camera.allFinite() ||
+                    point_camera.z() <= 1.0e-6) {
+                    continue;
+                }
+
+                const vector<2> projected =
+                    apply_k(
+                        point_camera,
+                        frame->K);
+                const double error =
+                    (projected -
+                     pnp_points_pixel[i])
+                        .norm();
+                inlier_squared_error +=
+                    error * error;
+                ++positive_depth_inliers;
+            }
+
+            const double inlier_rmse_px =
+                positive_depth_inliers == 0
+                    ? std::numeric_limits<
+                          double>::quiet_NaN()
+                    : std::sqrt(
+                          inlier_squared_error /
+                          static_cast<double>(
+                              positive_depth_inliers));
+
+            const PoseState vio_camera_pose =
+                frame->get_pose(
+                    frame->camera);
+            const double translation_delta_m =
+                (pnp_camera_pose.p -
+                 vio_camera_pose.p)
+                    .norm();
+            const double rotation_delta_deg =
+                camera_rotation_delta_deg(
+                    pnp_camera_pose,
+                    vio_camera_pose);
+
+            const bool pose_finite =
+                pnp_camera_pose.p.allFinite() &&
+                pnp_camera_pose.q.coeffs()
+                    .allFinite() &&
+                std::isfinite(
+                    translation_delta_m) &&
+                std::isfinite(
+                    rotation_delta_deg);
+            const bool geometrically_verified =
+                pose_finite &&
+                inlier_count >=
+                    min_verified_inliers &&
+                inlier_ratio >=
+                    min_verified_inlier_ratio;
+
+            std::fprintf(
+                stderr,
+                "[PlaceRetrievalVerificationShadow] "
+                "current=%zu t=%.9f rank=%zu key=%llu "
+                "candidate_frame_id=%zu candidate_t=%.9f "
+                "distance=%.9f frame_separation=%zu "
+                "timestamp_separation=%.9f "
+                "reference_observations=%zu "
+                "reference_descriptors=%zu "
+                "current_keypoints=%zu current_points=%zu "
+                "current_descriptors=%zu "
+                "raw_nn=%zu mutual=%zu mapped_2d3d=%zu "
+                "hamming_filtered=%zu correspondences=%zu "
+                "inliers=%zu inlier_ratio=%.6f "
+                "positive_depth_inliers=%zu "
+                "inlier_rmse_px=%.6f "
+                "pnp_p=%.9f,%.9f,%.9f "
+                "pnp_q=%.9f,%.9f,%.9f,%.9f "
+                "translation_delta_m=%.9f "
+                "rotation_delta_deg=%.9f "
+                "pose_finite=%d "
+                "extract_ms=%.3f match_ms=%.3f pnp_ms=%.3f "
+                "pnp_threshold_parameter_px=1.000 "
+                "max_hamming=%zu min_inliers=%zu "
+                "min_inlier_ratio=%.6f "
+                "temporal_excluded=0 geometrically_verified=%d "
+                "state_mutation=0\n",
+                frame->id(), frame->image->t,
+                rank,
+                static_cast<unsigned long long>(
+                    candidate.key),
+                reference_frame_id,
+                historical->timestamp,
+                candidate.distance,
+                frame_separation,
+                timestamp_separation,
+                reference->observations.size(),
+                reference->local_descriptors.size(),
+                frame->keypoint_num(),
+                current_points.size(),
+                current_descriptors.size(),
+                matches.nearest_neighbors.size(),
+                matches.mutual_matches.size(),
+                mapped_2d3d,
+                pnp_hamming_filtered,
+                correspondence_count,
+                inlier_count,
+                inlier_ratio,
+                positive_depth_inliers,
+                inlier_rmse_px,
+                pnp_camera_pose.p.x(),
+                pnp_camera_pose.p.y(),
+                pnp_camera_pose.p.z(),
+                pnp_camera_pose.q.x(),
+                pnp_camera_pose.q.y(),
+                pnp_camera_pose.q.z(),
+                pnp_camera_pose.q.w(),
+                translation_delta_m,
+                rotation_delta_deg,
+                pose_finite ? 1 : 0,
+                extract_ms, match_ms, pnp_ms,
+                pnp_max_hamming,
+                min_verified_inliers,
+                min_verified_inlier_ratio,
+                geometrically_verified ? 1 : 0);
+        } catch (const std::exception &e) {
+            const double pnp_ms =
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() -
+                    pnp_begin)
+                    .count();
+            std::fprintf(
+                stderr,
+                "[PlaceRetrievalVerificationShadow] "
+                "current=%zu t=%.9f rank=%zu key=%llu "
+                "candidate_frame_id=%zu candidate_t=%.9f "
+                "distance=%.9f frame_separation=%zu "
+                "timestamp_separation=%.9f "
+                "raw_nn=%zu mutual=%zu mapped_2d3d=%zu "
+                "hamming_filtered=%zu correspondences=%zu "
+                "extract_ms=%.3f match_ms=%.3f pnp_ms=%.3f "
+                "max_hamming=%zu min_inliers=%zu "
+                "min_inlier_ratio=%.6f "
+                "reject=pnp_exception error=%s "
+                "temporal_excluded=0 geometrically_verified=0 "
+                "state_mutation=0\n",
+                frame->id(), frame->image->t,
+                rank,
+                static_cast<unsigned long long>(
+                    candidate.key),
+                reference_frame_id,
+                historical->timestamp,
+                candidate.distance,
+                frame_separation,
+                timestamp_separation,
+                matches.nearest_neighbors.size(),
+                matches.mutual_matches.size(),
+                mapped_2d3d,
+                pnp_hamming_filtered,
+                correspondence_count,
+                extract_ms, match_ms, pnp_ms,
+                pnp_max_hamming,
+                min_verified_inliers,
+                min_verified_inlier_ratio,
+                e.what());
+        }
+    }
+}
+
+void SlidingWindowTracker::
+diagnose_pending_retrieved_place_candidates() {
+    if (pending_place_retrieval_candidates_.empty())
+        return;
+
+    std::vector<PendingPlaceRetrieval> pending;
+    pending.swap(pending_place_retrieval_candidates_);
+
+    for (const PendingPlaceRetrieval &entry : pending) {
+        Frame *frame = nullptr;
+        for (size_t i = 0; i < map->frame_num(); ++i) {
+            Frame *candidate_frame = map->get_frame(i);
+            if (candidate_frame &&
+                candidate_frame->id() == entry.frame_id) {
+                frame = candidate_frame;
+                break;
+            }
+        }
+
+        if (!frame || !frame->image) {
+            std::fprintf(
+                stderr,
+                "[PlaceRetrievalVerificationShadow] current=%zu "
+                "reject=current_not_active "
+                "state_mutation=0\n",
+                entry.frame_id);
+            continue;
+        }
+
+        diagnose_retrieved_place_candidates(
+            frame, entry.candidates);
+
+        const bool place_ready =
+            place_keyframes_.find(
+                static_cast<PlaceKey>(frame->id())) != nullptr;
+        const ArchivedKeyframe *archived =
+            keyframe_archive_.get(frame->id());
+        const bool local_ready =
+            !local_descriptor_shadow_enabled() ||
+            (archived &&
+             archived->local_descriptors_complete);
+        if (place_ready && local_ready) {
+            frame->image
+                ->retain_place_recognition_source(false);
+        }
+    }
+}
+
 void SlidingWindowTracker::extract_place_descriptors() {
     if (!place_descriptor_shadow_enabled())
         return;
@@ -1355,6 +2050,18 @@ void SlidingWindowTracker::extract_place_descriptors() {
                 continue;
             }
 
+            const bool retrieval_verification_pending =
+                retrieval_enabled &&
+                orb_pnp_shadow_enabled() &&
+                !candidates.empty();
+            if (retrieval_verification_pending) {
+                PendingPlaceRetrieval pending;
+                pending.frame_id = frame->id();
+                pending.candidates = candidates;
+                pending_place_retrieval_candidates_.emplace_back(
+                    std::move(pending));
+            }
+
             bool local_ready = true;
             if (local_descriptor_shadow_enabled()) {
                 const ArchivedKeyframe *archived =
@@ -1363,7 +2070,8 @@ void SlidingWindowTracker::extract_place_descriptors() {
                     archived &&
                     archived->local_descriptors_complete;
             }
-            if (local_ready) {
+            if (local_ready &&
+                !retrieval_verification_pending) {
                 frame->image
                     ->retain_place_recognition_source(false);
             }
@@ -1409,6 +2117,7 @@ bool SlidingWindowTracker::track() {
         refine_window();
         extract_place_descriptors();
         archive_optimized_keyframes();
+        diagnose_pending_retrieved_place_candidates();
         slide_window();
     } else {
         refine_subwindow();

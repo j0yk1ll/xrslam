@@ -55,12 +55,22 @@ class SlidingWindowTracker {
 
     void set_detail(XRSLAM::Detail *detail) { this->detail = detail; }
   private:
+    struct PendingPlaceRetrieval {
+        size_t frame_id = 0;
+        std::vector<PlaceCandidate> candidates;
+    };
+
     void archive_optimized_keyframes();
     void diagnose_orb_association(Frame *frame);
+    void diagnose_retrieved_place_candidates(
+        Frame *frame, const std::vector<PlaceCandidate> &candidates);
+    void diagnose_pending_retrieved_place_candidates();
     void extract_place_descriptors();
 
     KeyframeArchive keyframe_archive_;
     PlaceKeyframeStore place_keyframes_;
+    std::vector<PendingPlaceRetrieval>
+        pending_place_retrieval_candidates_;
     size_t local_descriptor_keyframe_count_ = 0;
     std::unordered_set<size_t> orb_association_processed_;
     std::shared_ptr<Config> config;
