@@ -18,6 +18,14 @@ if(NOT TARGET depends::yaml-cpp)
   set(YAML_CPP_BUILD_CONTRIB OFF CACHE BOOL "" FORCE)
   set(YAML_CPP_INSTALL OFF CACHE BOOL "" FORCE)
   add_subdirectory(${depends-yaml-cpp_SOURCE_DIR} ${depends-yaml-cpp_BINARY_DIR})
+
+  # yaml-cpp 0.7.0 uses fixed-width integer types without including
+  # <cstdint>. Newer GNU/Clang toolchains no longer provide those types
+  # transitively, so force the missing standard header into this target.
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(yaml-cpp PRIVATE -include cstdint)
+  endif()
+
   add_library(depends::yaml-cpp INTERFACE IMPORTED GLOBAL)
   if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC")
     target_compile_definitions(yaml-cpp

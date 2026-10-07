@@ -169,6 +169,52 @@ bool SlidingWindowTracker::track() {
 
     synchronize_feature_tracking_landmarks();
 
+    // Shadow-only keyframe instrumentation for place-recognition development.
+    // This does not mutate SLAM state. It reports each newly observed
+    // top-level keyframe together with the active local keyframe set after
+    // keyframe management, optimization, and window sliding have completed.
+    if (const char *value = std::getenv("XRSLAM_PLACE_KEYFRAME_SHADOW");
+        value && std::string(value) == "1") {
+        static std::unordered_set<size_t> logged_frame_ids;
+
+        std::string active_frame_ids;
+        for (size_t i = 0; i < map->frame_num(); ++i) {
+            Frame *frame = map->get_frame(i);
+            if (!frame || !frame->tag(FT_KEYFRAME))
+                continue;
+
+            if (!active_frame_ids.empty())
+                active_frame_ids += ';';
+            active_frame_ids += std::to_string(frame->id());
+        }
+
+        for (size_t i = 0; i < map->frame_num(); ++i) {
+            Frame *frame = map->get_frame(i);
+            if (!frame || !frame->tag(FT_KEYFRAME) || !frame->image)
+                continue;
+            if (!logged_frame_ids.emplace(frame->id()).second)
+                continue;
+
+            const PoseState camera_pose =
+                frame->get_pose(frame->camera);
+            std::fprintf(
+                stderr,
+                "[PlaceKeyframeShadow] frame_id=%zu t=%.9f "
+                "p=%.9f,%.9f,%.9f q=%.9f,%.9f,%.9f,%.9f "
+                "active=%s\n",
+                frame->id(),
+                frame->image->t,
+                camera_pose.p.x(),
+                camera_pose.p.y(),
+                camera_pose.p.z(),
+                camera_pose.q.x(),
+                camera_pose.q.y(),
+                camera_pose.q.z(),
+                camera_pose.q.w(),
+                active_frame_ids.c_str());
+        }
+    }
+
     inspect_debug(sliding_window_landmarks, landmarks) {
         std::vector<Landmark> points;
         points.reserve(map->track_num());
