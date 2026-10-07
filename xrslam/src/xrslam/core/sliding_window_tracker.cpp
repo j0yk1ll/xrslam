@@ -1244,6 +1244,17 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
         orb_pnp_max_hamming();
     const matrix<3> K_inv = frame->K.inverse();
 
+    std::vector<PlaceKey> verified_keys;
+    verified_keys.reserve(candidates.size());
+    size_t verified_rank_min =
+        std::numeric_limits<size_t>::max();
+    size_t verified_rank_max = 0;
+    size_t verified_reference_frame_min =
+        std::numeric_limits<size_t>::max();
+    size_t verified_reference_frame_max = 0;
+    size_t verified_max_frame_separation = 0;
+    double verified_max_abs_timestamp_separation = 0.0;
+
     for (size_t rank = 0;
          rank < candidates.size();
          ++rank) {
@@ -1681,6 +1692,30 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
                 inlier_ratio >=
                     min_verified_inlier_ratio;
 
+            if (geometrically_verified) {
+                verified_keys.emplace_back(candidate.key);
+                verified_rank_min =
+                    std::min(verified_rank_min, rank);
+                verified_rank_max =
+                    std::max(verified_rank_max, rank);
+                verified_reference_frame_min =
+                    std::min(
+                        verified_reference_frame_min,
+                        reference_frame_id);
+                verified_reference_frame_max =
+                    std::max(
+                        verified_reference_frame_max,
+                        reference_frame_id);
+                verified_max_frame_separation =
+                    std::max(
+                        verified_max_frame_separation,
+                        frame_separation);
+                verified_max_abs_timestamp_separation =
+                    std::max(
+                        verified_max_abs_timestamp_separation,
+                        std::abs(timestamp_separation));
+            }
+
             std::fprintf(
                 stderr,
                 "[PlaceRetrievalVerificationShadow] "
@@ -1788,6 +1823,71 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
                 e.what());
         }
     }
+
+    const size_t invalid_frame_id =
+        static_cast<size_t>(-1);
+    const bool previous_available =
+        previous_verified_current_frame_id_ !=
+        invalid_frame_id;
+    size_t exact_overlap = 0;
+    if (previous_available) {
+        for (PlaceKey key : verified_keys) {
+            if (std::find(
+                    previous_verified_place_keys_.begin(),
+                    previous_verified_place_keys_.end(),
+                    key) !=
+                previous_verified_place_keys_.end()) {
+                ++exact_overlap;
+            }
+        }
+    }
+
+    if (verified_keys.empty()) {
+        std::fprintf(
+            stderr,
+            "[PlaceVerifiedSetShadow] current=%zu t=%.9f "
+            "candidate_count=%zu verified_count=0 multi_verified=0 "
+            "previous_available=%d previous_current=%zu "
+            "previous_verified_count=%zu exact_key_overlap=%zu "
+            "state_mutation=0\n",
+            frame->id(), frame->image->t,
+            candidates.size(),
+            previous_available ? 1 : 0,
+            previous_available
+                ? previous_verified_current_frame_id_
+                : 0,
+            previous_verified_place_keys_.size(),
+            exact_overlap);
+    } else {
+        std::fprintf(
+            stderr,
+            "[PlaceVerifiedSetShadow] current=%zu t=%.9f "
+            "candidate_count=%zu verified_count=%zu multi_verified=%d "
+            "rank_min=%zu rank_max=%zu "
+            "reference_frame_min=%zu reference_frame_max=%zu "
+            "max_frame_separation=%zu "
+            "max_abs_timestamp_separation=%.9f "
+            "previous_available=%d previous_current=%zu "
+            "previous_verified_count=%zu exact_key_overlap=%zu "
+            "state_mutation=0\n",
+            frame->id(), frame->image->t,
+            candidates.size(), verified_keys.size(),
+            verified_keys.size() > 1 ? 1 : 0,
+            verified_rank_min, verified_rank_max,
+            verified_reference_frame_min,
+            verified_reference_frame_max,
+            verified_max_frame_separation,
+            verified_max_abs_timestamp_separation,
+            previous_available ? 1 : 0,
+            previous_available
+                ? previous_verified_current_frame_id_
+                : 0,
+            previous_verified_place_keys_.size(),
+            exact_overlap);
+    }
+
+    previous_verified_current_frame_id_ = frame->id();
+    previous_verified_place_keys_ = std::move(verified_keys);
 }
 
 void SlidingWindowTracker::

@@ -71,6 +71,9 @@ class SlidingWindowTracker {
     PlaceKeyframeStore place_keyframes_;
     std::vector<PendingPlaceRetrieval>
         pending_place_retrieval_candidates_;
+    size_t previous_verified_current_frame_id_ =
+        static_cast<size_t>(-1);
+    std::vector<PlaceKey> previous_verified_place_keys_;
     size_t local_descriptor_keyframe_count_ = 0;
     std::unordered_set<size_t> orb_association_processed_;
     std::shared_ptr<Config> config;
