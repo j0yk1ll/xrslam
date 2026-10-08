@@ -39,6 +39,12 @@ bool place_retrieval_shadow_enabled() {
     return value && std::string(value) == "1";
 }
 
+bool place_recovery_commit_enabled() {
+    const char *value =
+        std::getenv("XRSLAM_PLACE_RECOVERY_COMMIT");
+    return value && std::string(value) == "1";
+}
+
 bool place_descriptor_shadow_enabled() {
     const char *value =
         std::getenv("XRSLAM_PLACE_DESCRIPTOR_SHADOW");
@@ -2214,7 +2220,7 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
         };
 
     const auto log_neighborhoods =
-        [frame](
+        [this, frame](
             double threshold_s,
             const std::vector<NeighborhoodDiagnostic> &groups) {
             size_t persistent_groups = 0;
@@ -2692,12 +2698,32 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
                             live_bg_delta == 0.0 &&
                             live_ba_delta == 0.0;
 
+                        const bool commit_enabled =
+                            place_recovery_commit_enabled();
+                        const bool target_is_latest =
+                            map->frame_num() > 0 &&
+                            map->get_frame(map->frame_num() - 1) ==
+                                frame;
+                        const bool target_has_subframes =
+                            !frame->subframes.empty();
+                        const bool commit_target_ready =
+                            target_is_latest &&
+                            !target_has_subframes;
+                        const bool commit_preconditions_met =
+                            commit_target_ready &&
+                            live_state_unchanged;
+
                         std::fprintf(
                             stderr,
                             "[PlaceRecoveryCommitDryRun] "
                             "current=%zu t=%.9f event_id=%zu "
                             "acceptance_candidate=1 "
                             "commit_scope=pose_only "
+                            "commit_enabled=%d "
+                            "target_is_latest=%d "
+                            "target_has_subframes=%d "
+                            "commit_target_ready=%d "
+                            "commit_preconditions_met=%d "
                             "authoritative_body_p=%.9f,%.9f,%.9f "
                             "authoritative_body_q=%.9f,%.9f,%.9f,%.9f "
                             "proposed_body_p=%.9f,%.9f,%.9f "
@@ -2722,6 +2748,11 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
                             "commit_applied=0 state_mutation=0\n",
                             frame->id(), frame->image->t,
                             group.event_id,
+                            commit_enabled ? 1 : 0,
+                            target_is_latest ? 1 : 0,
+                            target_has_subframes ? 1 : 0,
+                            commit_target_ready ? 1 : 0,
+                            commit_preconditions_met ? 1 : 0,
                             authoritative_body_pose.p.x(),
                             authoritative_body_pose.p.y(),
                             authoritative_body_pose.p.z(),
@@ -2754,6 +2785,113 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
                             live_bg_delta,
                             live_ba_delta,
                             live_state_unchanged ? 1 : 0);
+
+                        if (commit_enabled &&
+                            !commit_preconditions_met) {
+                            const char *skip_reason =
+                                !target_is_latest
+                                    ? "target_not_latest"
+                                : target_has_subframes
+                                    ? "target_has_subframes"
+                                : !live_state_unchanged
+                                    ? "precommit_state_changed"
+                                : "unknown";
+
+                            std::fprintf(
+                                stderr,
+                                "[PlaceRecoveryCommit] "
+                                "current=%zu t=%.9f event_id=%zu "
+                                "commit_scope=pose_only "
+                                "commit_enabled=1 "
+                                "commit_preconditions_met=0 "
+                                "reason=%s "
+                                "target_is_latest=%d "
+                                "target_has_subframes=%d "
+                                "motion_preserved=1 "
+                                "estimator_reset=0 loop_constraint=0 "
+                                "commit_applied=0 state_mutation=0\n",
+                                frame->id(), frame->image->t,
+                                group.event_id,
+                                skip_reason,
+                                target_is_latest ? 1 : 0,
+                                target_has_subframes ? 1 : 0);
+                        } else if (
+                            commit_enabled &&
+                            commit_preconditions_met) {
+                            const MotionState motion_before_commit =
+                                frame->motion;
+
+                            frame->pose = recovery_body_pose;
+
+                            const double applied_delta_t =
+                                (frame->pose.p -
+                                 authoritative_body_pose.p)
+                                    .norm();
+                            const double applied_delta_r =
+                                camera_rotation_delta_deg(
+                                    authoritative_body_pose,
+                                    frame->pose);
+                            const double candidate_pose_delta_t =
+                                (frame->pose.p -
+                                 recovery_body_pose.p)
+                                    .norm();
+                            const double candidate_q_coeff_delta =
+                                (frame->pose.q.coeffs() -
+                                 recovery_body_pose.q.coeffs())
+                                    .norm();
+                            const double committed_v_delta =
+                                (frame->motion.v -
+                                 motion_before_commit.v)
+                                    .norm();
+                            const double committed_bg_delta =
+                                (frame->motion.bg -
+                                 motion_before_commit.bg)
+                                    .norm();
+                            const double committed_ba_delta =
+                                (frame->motion.ba -
+                                 motion_before_commit.ba)
+                                    .norm();
+
+                            const bool pose_matches_candidate =
+                                candidate_pose_delta_t == 0.0 &&
+                                candidate_q_coeff_delta == 0.0;
+                            const bool motion_preserved =
+                                committed_v_delta == 0.0 &&
+                                committed_bg_delta == 0.0 &&
+                                committed_ba_delta == 0.0;
+
+                            std::fprintf(
+                                stderr,
+                                "[PlaceRecoveryCommit] "
+                                "current=%zu t=%.9f event_id=%zu "
+                                "commit_scope=pose_only "
+                                "commit_enabled=1 "
+                                "commit_preconditions_met=1 "
+                                "reason=committed "
+                                "applied_delta_t=%.9f "
+                                "applied_delta_r_deg=%.9f "
+                                "candidate_pose_delta_t=%.9f "
+                                "candidate_q_coeff_delta=%.9f "
+                                "committed_v_delta=%.9f "
+                                "committed_bg_delta=%.9f "
+                                "committed_ba_delta=%.9f "
+                                "pose_matches_candidate=%d "
+                                "motion_preserved=%d "
+                                "estimator_reset=0 loop_constraint=0 "
+                                "archive_refresh_deferred=1 "
+                                "commit_applied=1 state_mutation=1\n",
+                                frame->id(), frame->image->t,
+                                group.event_id,
+                                applied_delta_t,
+                                applied_delta_r,
+                                candidate_pose_delta_t,
+                                candidate_q_coeff_delta,
+                                committed_v_delta,
+                                committed_bg_delta,
+                                committed_ba_delta,
+                                pose_matches_candidate ? 1 : 0,
+                                motion_preserved ? 1 : 0);
+                        }
                     }
                 }
             }
