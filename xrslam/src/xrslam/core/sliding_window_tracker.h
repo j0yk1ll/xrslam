@@ -89,6 +89,15 @@ class SlidingWindowTracker {
         size_t reference_frame_id = 0;
     };
 
+    struct PlaceRecoveryCommitCancellationState {
+        size_t event_id = 0;
+        size_t current_frame_id = 0;
+        double timestamp = 0.0;
+        double target_translation_m = 0.0;
+        double world_yaw_rad = 0.0;
+        vector<3> world_translation = vector<3>::Zero();
+    };
+
     void archive_optimized_keyframes();
     void diagnose_orb_association(Frame *frame);
     void diagnose_retrieved_place_candidates(
@@ -127,6 +136,8 @@ class SlidingWindowTracker {
         vector<3>::Zero();
     double place_recovery_cumulative_target_translation_m_ = 0.0;
     double place_recovery_cumulative_abs_yaw_rad_ = 0.0;
+    std::vector<PlaceRecoveryCommitCancellationState>
+        recent_place_recovery_commits_;
 
     size_t local_descriptor_keyframe_count_ = 0;
     std::unordered_set<size_t> orb_association_processed_;

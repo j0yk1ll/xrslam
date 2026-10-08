@@ -4000,6 +4000,265 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
                                 place_recovery_commit_cadence_available_ =
                                     true;
 
+                                // 0110n: quantify recent correction
+                                // cancellation without changing any gate.
+                                constexpr double
+                                    cancellation_window_s = 5.0;
+                                PlaceRecoveryCommitCancellationState
+                                    cancellation_current;
+                                cancellation_current.event_id =
+                                    group.event_id;
+                                cancellation_current.current_frame_id =
+                                    frame->id();
+                                cancellation_current.timestamp =
+                                    frame->image->t;
+                                cancellation_current.target_translation_m =
+                                    target_applied_delta_t;
+                                cancellation_current.world_yaw_rad =
+                                    coherent_yaw_rad;
+                                cancellation_current.world_translation =
+                                    coherent_translation;
+                                recent_place_recovery_commits_
+                                    .emplace_back(
+                                        cancellation_current);
+
+                                const double cancellation_window_start =
+                                    frame->image->t -
+                                    cancellation_window_s;
+                                recent_place_recovery_commits_.erase(
+                                    std::remove_if(
+                                        recent_place_recovery_commits_
+                                            .begin(),
+                                        recent_place_recovery_commits_
+                                            .end(),
+                                        [cancellation_window_start](
+                                            const PlaceRecoveryCommitCancellationState
+                                                &entry) {
+                                            return entry.timestamp <
+                                                cancellation_window_start;
+                                        }),
+                                    recent_place_recovery_commits_
+                                        .end());
+
+                                double cancellation_path_world_t = 0.0;
+                                double cancellation_path_target_t = 0.0;
+                                double cancellation_path_abs_yaw = 0.0;
+                                quaternion cancellation_net_q =
+                                    quaternion::Identity();
+                                vector<3> cancellation_net_p =
+                                    vector<3>::Zero();
+
+                                for (const auto &entry :
+                                     recent_place_recovery_commits_) {
+                                    quaternion entry_q;
+                                    entry_q =
+                                        Eigen::AngleAxisd(
+                                            entry.world_yaw_rad,
+                                            Eigen::Vector3d::UnitZ());
+                                    entry_q.normalize();
+
+                                    cancellation_net_p =
+                                        entry_q *
+                                            cancellation_net_p +
+                                        entry.world_translation;
+                                    cancellation_net_q =
+                                        entry_q *
+                                        cancellation_net_q;
+                                    cancellation_net_q.normalize();
+
+                                    cancellation_path_world_t +=
+                                        entry.world_translation.norm();
+                                    cancellation_path_target_t +=
+                                        entry.target_translation_m;
+                                    cancellation_path_abs_yaw +=
+                                        std::abs(
+                                            entry.world_yaw_rad);
+                                }
+
+                                const matrix<3>
+                                    cancellation_net_R =
+                                        cancellation_net_q.matrix();
+                                const double cancellation_net_yaw =
+                                    std::atan2(
+                                        cancellation_net_R(1, 0),
+                                        cancellation_net_R(0, 0));
+                                const double cancellation_net_t =
+                                    cancellation_net_p.norm();
+                                const double
+                                    cancellation_translation_efficiency =
+                                        cancellation_path_world_t >
+                                                1.0e-12
+                                            ? cancellation_net_t /
+                                                  cancellation_path_world_t
+                                            : std::numeric_limits<double>::
+                                                  quiet_NaN();
+                                const double cancellation_yaw_efficiency =
+                                    cancellation_path_abs_yaw >
+                                            1.0e-12
+                                        ? std::abs(
+                                              cancellation_net_yaw) /
+                                              cancellation_path_abs_yaw
+                                        : std::numeric_limits<double>::
+                                              quiet_NaN();
+                                const double
+                                    cancellation_translation_fraction =
+                                        std::isfinite(
+                                            cancellation_translation_efficiency)
+                                            ? 1.0 -
+                                                  cancellation_translation_efficiency
+                                            : std::numeric_limits<double>::
+                                                  quiet_NaN();
+                                const double cancellation_yaw_fraction =
+                                    std::isfinite(
+                                        cancellation_yaw_efficiency)
+                                        ? 1.0 -
+                                              cancellation_yaw_efficiency
+                                        : std::numeric_limits<double>::
+                                              quiet_NaN();
+                                const double cancellation_span_s =
+                                    recent_place_recovery_commits_
+                                                .size() >= 2
+                                        ? frame->image->t -
+                                              recent_place_recovery_commits_
+                                                  .front()
+                                                  .timestamp
+                                        : 0.0;
+                                const size_t cancellation_oldest_event =
+                                    recent_place_recovery_commits_.empty()
+                                        ? 0
+                                        : recent_place_recovery_commits_
+                                              .front()
+                                              .event_id;
+                                const size_t cancellation_oldest_frame =
+                                    recent_place_recovery_commits_.empty()
+                                        ? 0
+                                        : recent_place_recovery_commits_
+                                              .front()
+                                              .current_frame_id;
+
+                                std::fprintf(
+                                    stderr,
+                                    "[PlaceRecoveryCancellationShadow] "
+                                    "current=%zu t=%.9f event_id=%zu "
+                                    "window_s=%.3f "
+                                    "window_commit_count=%zu "
+                                    "window_span_s=%.9f "
+                                    "oldest_event_id=%zu "
+                                    "oldest_current=%zu "
+                                    "path_world_translation_m=%.9f "
+                                    "path_target_translation_m=%.9f "
+                                    "net_world_translation_m=%.9f "
+                                    "world_translation_efficiency=%.9f "
+                                    "world_translation_cancellation=%.9f "
+                                    "path_abs_yaw_deg=%.9f "
+                                    "net_world_yaw_deg=%.9f "
+                                    "yaw_efficiency=%.9f "
+                                    "yaw_cancellation=%.9f "
+                                    "commit_postconditions=%d "
+                                    "acceptance_gate_changed=0 "
+                                    "commit_gate_changed=0 "
+                                    "diagnostic_only=1\n",
+                                    frame->id(),
+                                    frame->image->t,
+                                    group.event_id,
+                                    cancellation_window_s,
+                                    recent_place_recovery_commits_.size(),
+                                    cancellation_span_s,
+                                    cancellation_oldest_event,
+                                    cancellation_oldest_frame,
+                                    cancellation_path_world_t,
+                                    cancellation_path_target_t,
+                                    cancellation_net_t,
+                                    cancellation_translation_efficiency,
+                                    cancellation_translation_fraction,
+                                    cancellation_path_abs_yaw *
+                                        180.0 / M_PI,
+                                    cancellation_net_yaw *
+                                        180.0 / M_PI,
+                                    cancellation_yaw_efficiency,
+                                    cancellation_yaw_fraction,
+                                    coherent_commit_postconditions ? 1 : 0);
+
+                                // 0110o shadow-only suppression policy. This
+                                // classifies the observed committed history;
+                                // it deliberately does not claim a
+                                // counterfactual estimator trajectory.
+                                constexpr size_t
+                                    suppression_policy_min_commits = 3;
+                                constexpr double
+                                    suppression_policy_max_translation_efficiency =
+                                        0.25;
+                                constexpr double
+                                    suppression_policy_max_yaw_efficiency =
+                                        0.25;
+
+                                const bool
+                                    suppression_policy_count_met =
+                                        recent_place_recovery_commits_
+                                            .size() >=
+                                        suppression_policy_min_commits;
+                                const bool
+                                    suppression_policy_translation_met =
+                                        std::isfinite(
+                                            cancellation_translation_efficiency) &&
+                                        cancellation_translation_efficiency <=
+                                            suppression_policy_max_translation_efficiency;
+                                const bool suppression_policy_yaw_met =
+                                    std::isfinite(
+                                        cancellation_yaw_efficiency) &&
+                                    cancellation_yaw_efficiency <=
+                                        suppression_policy_max_yaw_efficiency;
+                                const bool suppression_policy_would_suppress =
+                                    suppression_policy_count_met &&
+                                    suppression_policy_translation_met &&
+                                    suppression_policy_yaw_met;
+
+                                std::fprintf(
+                                    stderr,
+                                    "[PlaceRecoverySuppressionPolicyShadow] "
+                                    "current=%zu t=%.9f event_id=%zu "
+                                    "policy=rolling_cancellation "
+                                    "window_s=%.3f "
+                                    "window_commit_count=%zu "
+                                    "window_span_s=%.9f "
+                                    "min_commits=%zu "
+                                    "max_world_translation_efficiency=%.6f "
+                                    "max_yaw_efficiency=%.6f "
+                                    "world_translation_efficiency=%.9f "
+                                    "yaw_efficiency=%.9f "
+                                    "world_translation_cancellation=%.9f "
+                                    "yaw_cancellation=%.9f "
+                                    "count_condition=%d "
+                                    "translation_condition=%d "
+                                    "yaw_condition=%d "
+                                    "would_suppress=%d "
+                                    "actual_commit_applied=1 "
+                                    "counterfactual_estimator=0 "
+                                    "acceptance_gate_changed=0 "
+                                    "commit_gate_changed=0 "
+                                    "diagnostic_only=1\n",
+                                    frame->id(),
+                                    frame->image->t,
+                                    group.event_id,
+                                    cancellation_window_s,
+                                    recent_place_recovery_commits_.size(),
+                                    cancellation_span_s,
+                                    suppression_policy_min_commits,
+                                    suppression_policy_max_translation_efficiency,
+                                    suppression_policy_max_yaw_efficiency,
+                                    cancellation_translation_efficiency,
+                                    cancellation_yaw_efficiency,
+                                    cancellation_translation_fraction,
+                                    cancellation_yaw_fraction,
+                                    suppression_policy_count_met ? 1 : 0,
+                                    suppression_policy_translation_met
+                                        ? 1
+                                        : 0,
+                                    suppression_policy_yaw_met ? 1 : 0,
+                                    suppression_policy_would_suppress
+                                        ? 1
+                                        : 0);
+
                                 PlaceRecoveryCommitReconciliationState
                                     reconciliation;
                                 reconciliation.event_id = group.event_id;
