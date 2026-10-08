@@ -3640,6 +3640,335 @@ diagnose_place_recovery_commit_reconciliation() {
                     seeded_recovery_visual_imu_bg_delta,
                     seeded_recovery_visual_imu_ba_delta);
 
+                // Coherent-trajectory IMU shadow. A global yaw+translation
+                // transform is a gauge symmetry of the inertial model because
+                // world gravity remains on -Z. A full 3D rotation is not:
+                // roll/pitch rotates the local trajectory relative to gravity.
+                //
+                // Apply the same correction to the previous and current
+                // cloned states, including rotating world-frame velocity.
+                // Biases remain unchanged because they live in the IMU/body
+                // frame. Compare IMU-only and IMU+recovery solves for both
+                // the full correction and its gravity-preserving yaw part.
+                struct CoherentImuShadowResult {
+                    bool usable = false;
+                    bool imu_prior = false;
+                    size_t recovery_factors = 0;
+                    PoseState seed_pose;
+                    MotionState seed_motion;
+                    PoseState pose;
+                    MotionState motion;
+                    double recovery_rmse_px =
+                        std::numeric_limits<double>::quiet_NaN();
+                };
+
+                quaternion full_correction_q =
+                    state.committed_body_pose.q *
+                    target->pose.q.conjugate();
+                full_correction_q.normalize();
+                const vector<3> full_correction_p =
+                    state.committed_body_pose.p -
+                    full_correction_q * target->pose.p;
+
+                const matrix<3> full_correction_R =
+                    full_correction_q.matrix();
+                const double yaw_correction_rad =
+                    std::atan2(
+                        full_correction_R(1, 0),
+                        full_correction_R(0, 0));
+                quaternion yaw_correction_q;
+                yaw_correction_q =
+                    Eigen::AngleAxisd(
+                        yaw_correction_rad,
+                        Eigen::Vector3d::UnitZ());
+                yaw_correction_q.normalize();
+                const vector<3> yaw_correction_p =
+                    state.committed_body_pose.p -
+                    yaw_correction_q * target->pose.p;
+
+                const auto run_coherent_imu_shadow =
+                    [this, target, target_top_index, &state,
+                     &recovery_rmse_px](
+                        const quaternion &correction_q,
+                        const vector<3> &correction_p,
+                        bool include_recovery) {
+                        CoherentImuShadowResult result;
+                        if (!config->has_imu() ||
+                            target_top_index == 0 ||
+                            !target->image) {
+                            return result;
+                        }
+
+                        Frame *previous =
+                            map->get_frame(target_top_index - 1);
+                        if (!previous)
+                            return result;
+
+                        std::unique_ptr<Frame> previous_owner =
+                            previous->clone();
+                        std::unique_ptr<Frame> target_owner =
+                            target->clone();
+                        Frame *shadow_previous =
+                            previous_owner.get();
+                        Frame *shadow_target =
+                            target_owner.get();
+
+                        const auto transform_state =
+                            [&correction_q, &correction_p](
+                                Frame *frame) {
+                                frame->pose.q =
+                                    correction_q *
+                                    frame->pose.q;
+                                frame->pose.q.normalize();
+                                frame->pose.p =
+                                    correction_q *
+                                        frame->pose.p +
+                                    correction_p;
+                                frame->motion.v =
+                                    correction_q *
+                                    frame->motion.v;
+                            };
+
+                        transform_state(shadow_previous);
+                        transform_state(shadow_target);
+                        shadow_target->tag(FT_FIX_POSE) = false;
+                        shadow_target->tag(FT_FIX_MOTION) = false;
+
+                        result.seed_pose = shadow_target->pose;
+                        result.seed_motion = shadow_target->motion;
+                        result.pose = shadow_target->pose;
+                        result.motion = shadow_target->motion;
+
+                        PreIntegrator shadow_preintegration =
+                            target->keyframe_preintegration;
+                        if (!shadow_preintegration.integrate(
+                                target->image->t,
+                                shadow_previous->motion.bg,
+                                shadow_previous->motion.ba,
+                                true, true)) {
+                            return result;
+                        }
+
+                        auto solver = Solver::create();
+                        solver->add_frame_states(shadow_target);
+                        solver->put_factor(
+                            Solver::
+                                create_preintegration_prior_factor(
+                                    shadow_previous,
+                                    shadow_target,
+                                    shadow_preintegration));
+                        result.imu_prior = true;
+
+                        if (include_recovery) {
+                            for (size_t i = 0;
+                                 i < state
+                                         .recovery_landmarks_world
+                                         .size();
+                                 ++i) {
+                                solver
+                                    ->add_learned_world_reprojection(
+                                        shadow_target,
+                                        state
+                                            .recovery_landmarks_world[i],
+                                        state
+                                            .recovery_observations_pixel[i]);
+                                ++result.recovery_factors;
+                            }
+                        }
+
+                        result.usable = solver->solve();
+                        result.pose = shadow_target->pose;
+                        result.motion = shadow_target->motion;
+                        result.recovery_rmse_px =
+                            recovery_rmse_px(
+                                shadow_target->pose);
+                        return result;
+                    };
+
+                const CoherentImuShadowResult full_imu =
+                    run_coherent_imu_shadow(
+                        full_correction_q,
+                        full_correction_p,
+                        false);
+                const CoherentImuShadowResult full_imu_recovery =
+                    run_coherent_imu_shadow(
+                        full_correction_q,
+                        full_correction_p,
+                        true);
+                const CoherentImuShadowResult yaw_imu =
+                    run_coherent_imu_shadow(
+                        yaw_correction_q,
+                        yaw_correction_p,
+                        false);
+                const CoherentImuShadowResult yaw_imu_recovery =
+                    run_coherent_imu_shadow(
+                        yaw_correction_q,
+                        yaw_correction_p,
+                        true);
+
+                const auto coherent_seed_to_committed_t =
+                    [&state](
+                        const CoherentImuShadowResult &result) {
+                        return (result.seed_pose.p -
+                                state.committed_body_pose.p)
+                            .norm();
+                    };
+                const auto coherent_seed_to_committed_r =
+                    [&state](
+                        const CoherentImuShadowResult &result) {
+                        return camera_rotation_delta_deg(
+                            state.committed_body_pose,
+                            result.seed_pose);
+                    };
+                const auto coherent_final_delta_seed_t =
+                    [](const CoherentImuShadowResult &result) {
+                        return (result.pose.p -
+                                result.seed_pose.p)
+                            .norm();
+                    };
+                const auto coherent_final_delta_seed_r =
+                    [](const CoherentImuShadowResult &result) {
+                        return camera_rotation_delta_deg(
+                            result.seed_pose,
+                            result.pose);
+                    };
+                const auto coherent_final_to_committed_t =
+                    [&state](
+                        const CoherentImuShadowResult &result) {
+                        return (result.pose.p -
+                                state.committed_body_pose.p)
+                            .norm();
+                    };
+                const auto coherent_final_to_committed_r =
+                    [&state](
+                        const CoherentImuShadowResult &result) {
+                        return camera_rotation_delta_deg(
+                            state.committed_body_pose,
+                            result.pose);
+                    };
+                const auto coherent_v_delta =
+                    [](const CoherentImuShadowResult &result) {
+                        return (result.motion.v -
+                                result.seed_motion.v)
+                            .norm();
+                    };
+                const auto coherent_bg_delta =
+                    [](const CoherentImuShadowResult &result) {
+                        return (result.motion.bg -
+                                result.seed_motion.bg)
+                            .norm();
+                    };
+                const auto coherent_ba_delta =
+                    [](const CoherentImuShadowResult &result) {
+                        return (result.motion.ba -
+                                result.seed_motion.ba)
+                            .norm();
+                    };
+
+                std::fprintf(
+                    stderr,
+                    "[PlaceRecoveryCoherentImuShadow] "
+                    "event_id=%zu commit_frame=%zu "
+                    "commit_t=%.9f latest_refined_frame=%zu "
+                    "topology=coherent_previous_current "
+                    "marginalization_prior=0 visual_factors=0 "
+                    "full_correction_r_deg=%.9f "
+                    "yaw_correction_deg=%.9f "
+                    "full_seed_to_committed_t=%.9f "
+                    "full_seed_to_committed_r_deg=%.9f "
+                    "yaw_seed_to_committed_t=%.9f "
+                    "yaw_seed_to_committed_r_deg=%.9f "
+                    "full_imu_usable=%d full_imu_prior=%d "
+                    "full_imu_delta_seed_t=%.9f "
+                    "full_imu_delta_seed_r_deg=%.9f "
+                    "full_imu_to_committed_t=%.9f "
+                    "full_imu_to_committed_r_deg=%.9f "
+                    "full_imu_recovery_usable=%d "
+                    "full_imu_recovery_prior=%d "
+                    "full_imu_recovery_factors=%zu "
+                    "full_imu_recovery_rmse_px=%.9f "
+                    "full_imu_recovery_delta_seed_t=%.9f "
+                    "full_imu_recovery_delta_seed_r_deg=%.9f "
+                    "full_imu_recovery_to_committed_t=%.9f "
+                    "full_imu_recovery_to_committed_r_deg=%.9f "
+                    "full_imu_recovery_v_delta=%.9f "
+                    "full_imu_recovery_bg_delta=%.9f "
+                    "full_imu_recovery_ba_delta=%.9f "
+                    "yaw_imu_usable=%d yaw_imu_prior=%d "
+                    "yaw_imu_delta_seed_t=%.9f "
+                    "yaw_imu_delta_seed_r_deg=%.9f "
+                    "yaw_imu_to_committed_t=%.9f "
+                    "yaw_imu_to_committed_r_deg=%.9f "
+                    "yaw_imu_recovery_usable=%d "
+                    "yaw_imu_recovery_prior=%d "
+                    "yaw_imu_recovery_factors=%zu "
+                    "yaw_imu_recovery_rmse_px=%.9f "
+                    "yaw_imu_recovery_delta_seed_t=%.9f "
+                    "yaw_imu_recovery_delta_seed_r_deg=%.9f "
+                    "yaw_imu_recovery_to_committed_t=%.9f "
+                    "yaw_imu_recovery_to_committed_r_deg=%.9f "
+                    "yaw_imu_recovery_v_delta=%.9f "
+                    "yaw_imu_recovery_bg_delta=%.9f "
+                    "yaw_imu_recovery_ba_delta=%.9f "
+                    "bias_transform=unchanged "
+                    "velocity_transform=world_rotated "
+                    "state_mutation=0\n",
+                    state.event_id,
+                    state.frame_id,
+                    state.timestamp,
+                    latest_refined_frame_id,
+                    camera_rotation_delta_deg(
+                        target->pose,
+                        state.committed_body_pose),
+                    std::abs(yaw_correction_rad) *
+                        180.0 / M_PI,
+                    coherent_seed_to_committed_t(full_imu),
+                    coherent_seed_to_committed_r(full_imu),
+                    coherent_seed_to_committed_t(yaw_imu),
+                    coherent_seed_to_committed_r(yaw_imu),
+                    full_imu.usable ? 1 : 0,
+                    full_imu.imu_prior ? 1 : 0,
+                    coherent_final_delta_seed_t(full_imu),
+                    coherent_final_delta_seed_r(full_imu),
+                    coherent_final_to_committed_t(full_imu),
+                    coherent_final_to_committed_r(full_imu),
+                    full_imu_recovery.usable ? 1 : 0,
+                    full_imu_recovery.imu_prior ? 1 : 0,
+                    full_imu_recovery.recovery_factors,
+                    full_imu_recovery.recovery_rmse_px,
+                    coherent_final_delta_seed_t(
+                        full_imu_recovery),
+                    coherent_final_delta_seed_r(
+                        full_imu_recovery),
+                    coherent_final_to_committed_t(
+                        full_imu_recovery),
+                    coherent_final_to_committed_r(
+                        full_imu_recovery),
+                    coherent_v_delta(full_imu_recovery),
+                    coherent_bg_delta(full_imu_recovery),
+                    coherent_ba_delta(full_imu_recovery),
+                    yaw_imu.usable ? 1 : 0,
+                    yaw_imu.imu_prior ? 1 : 0,
+                    coherent_final_delta_seed_t(yaw_imu),
+                    coherent_final_delta_seed_r(yaw_imu),
+                    coherent_final_to_committed_t(yaw_imu),
+                    coherent_final_to_committed_r(yaw_imu),
+                    yaw_imu_recovery.usable ? 1 : 0,
+                    yaw_imu_recovery.imu_prior ? 1 : 0,
+                    yaw_imu_recovery.recovery_factors,
+                    yaw_imu_recovery.recovery_rmse_px,
+                    coherent_final_delta_seed_t(
+                        yaw_imu_recovery),
+                    coherent_final_delta_seed_r(
+                        yaw_imu_recovery),
+                    coherent_final_to_committed_t(
+                        yaw_imu_recovery),
+                    coherent_final_to_committed_r(
+                        yaw_imu_recovery),
+                    coherent_v_delta(yaw_imu_recovery),
+                    coherent_bg_delta(yaw_imu_recovery),
+                    coherent_ba_delta(yaw_imu_recovery));
+
                 std::fprintf(
                     stderr,
                     "[PlaceRecoveryFactorIntegrationShadow] "
