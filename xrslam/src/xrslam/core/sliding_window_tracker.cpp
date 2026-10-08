@@ -2891,6 +2891,18 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
                                 committed_ba_delta,
                                 pose_matches_candidate ? 1 : 0,
                                 motion_preserved ? 1 : 0);
+
+                            PlaceRecoveryCommitReconciliationState
+                                reconciliation;
+                            reconciliation.event_id = group.event_id;
+                            reconciliation.frame_id = frame->id();
+                            reconciliation.timestamp = frame->image->t;
+                            reconciliation.precommit_body_pose =
+                                authoritative_body_pose;
+                            reconciliation.committed_body_pose = frame->pose;
+                            reconciliation.committed_motion = frame->motion;
+                            active_place_recovery_commit_reconciliations_
+                                .emplace_back(std::move(reconciliation));
                         }
                     }
                 }
@@ -3039,6 +3051,132 @@ diagnose_pending_retrieved_place_candidates() {
                 ->retain_place_recognition_source(false);
         }
     }
+}
+
+void SlidingWindowTracker::
+diagnose_place_recovery_commit_reconciliation() {
+    if (active_place_recovery_commit_reconciliations_.empty())
+        return;
+
+    const size_t latest_refined_frame_id =
+        map->frame_num() > 0
+            ? map->get_frame(map->frame_num() - 1)->id()
+            : 0;
+
+    std::vector<PlaceRecoveryCommitReconciliationState> active;
+    active.reserve(
+        active_place_recovery_commit_reconciliations_.size());
+
+    for (auto &state :
+         active_place_recovery_commit_reconciliations_) {
+        Frame *target = nullptr;
+        bool target_is_top_level = false;
+
+        for (size_t i = 0;
+             i < map->frame_num() && !target;
+             ++i) {
+            Frame *top = map->get_frame(i);
+            if (!top)
+                continue;
+
+            if (top->id() == state.frame_id) {
+                target = top;
+                target_is_top_level = true;
+                break;
+            }
+
+            for (const auto &subframe : top->subframes) {
+                if (subframe &&
+                    subframe->id() == state.frame_id) {
+                    target = subframe.get();
+                    break;
+                }
+            }
+        }
+
+        if (!target) {
+            std::fprintf(
+                stderr,
+                "[PlaceRecoveryCommitReconcile] "
+                "event_id=%zu commit_frame=%zu "
+                "commit_t=%.9f target_active=0 "
+                "samples_emitted=%zu retired=1 "
+                "state_mutation=0\n",
+                state.event_id,
+                state.frame_id,
+                state.timestamp,
+                state.samples_emitted);
+            continue;
+        }
+
+        const double current_to_committed_t =
+            (target->pose.p - state.committed_body_pose.p).norm();
+        const double current_to_committed_r =
+            camera_rotation_delta_deg(
+                state.committed_body_pose, target->pose);
+        const double current_to_precommit_t =
+            (target->pose.p - state.precommit_body_pose.p).norm();
+        const double current_to_precommit_r =
+            camera_rotation_delta_deg(
+                state.precommit_body_pose, target->pose);
+
+        const double v_delta =
+            (target->motion.v - state.committed_motion.v).norm();
+        const double bg_delta =
+            (target->motion.bg - state.committed_motion.bg).norm();
+        const double ba_delta =
+            (target->motion.ba - state.committed_motion.ba).norm();
+
+        const size_t frame_gap =
+            latest_refined_frame_id >= state.frame_id
+                ? latest_refined_frame_id - state.frame_id
+                : state.frame_id - latest_refined_frame_id;
+        ++state.samples_emitted;
+
+        std::fprintf(
+            stderr,
+            "[PlaceRecoveryCommitReconcile] "
+            "event_id=%zu commit_frame=%zu "
+            "commit_t=%.9f sample=%zu "
+            "latest_refined_frame=%zu frame_gap=%zu "
+            "target_active=1 target_is_top_level=%d "
+            "current_to_committed_t=%.9f "
+            "current_to_committed_r_deg=%.9f "
+            "current_to_precommit_t=%.9f "
+            "current_to_precommit_r_deg=%.9f "
+            "current_v_delta=%.9f "
+            "current_bg_delta=%.9f "
+            "current_ba_delta=%.9f "
+            "target_body_p=%.9f,%.9f,%.9f "
+            "target_body_q=%.9f,%.9f,%.9f,%.9f "
+            "retired=0 state_mutation=0\n",
+            state.event_id,
+            state.frame_id,
+            state.timestamp,
+            state.samples_emitted,
+            latest_refined_frame_id,
+            frame_gap,
+            target_is_top_level ? 1 : 0,
+            current_to_committed_t,
+            current_to_committed_r,
+            current_to_precommit_t,
+            current_to_precommit_r,
+            v_delta,
+            bg_delta,
+            ba_delta,
+            target->pose.p.x(),
+            target->pose.p.y(),
+            target->pose.p.z(),
+            target->pose.q.x(),
+            target->pose.q.y(),
+            target->pose.q.z(),
+            target->pose.q.w());
+
+        active.emplace_back(std::move(state));
+    }
+
+    active_place_recovery_commit_reconciliations_ =
+        std::move(active);
 }
 
 void SlidingWindowTracker::extract_place_descriptors() {
@@ -3318,6 +3456,7 @@ bool SlidingWindowTracker::track() {
     if (manage_keyframe()) {
         track_landmark();
         refine_window();
+        diagnose_place_recovery_commit_reconciliation();
         extract_place_descriptors();
         archive_optimized_keyframes();
         diagnose_pending_retrieved_place_candidates();

@@ -68,11 +68,22 @@ class SlidingWindowTracker {
         size_t last_current_frame_id = 0;
     };
 
+    struct PlaceRecoveryCommitReconciliationState {
+        size_t event_id = 0;
+        size_t frame_id = 0;
+        double timestamp = 0.0;
+        PoseState precommit_body_pose;
+        PoseState committed_body_pose;
+        MotionState committed_motion;
+        size_t samples_emitted = 0;
+    };
+
     void archive_optimized_keyframes();
     void diagnose_orb_association(Frame *frame);
     void diagnose_retrieved_place_candidates(
         Frame *frame, const std::vector<PlaceCandidate> &candidates);
     void diagnose_pending_retrieved_place_candidates();
+    void diagnose_place_recovery_commit_reconciliation();
     void extract_place_descriptors();
 
     KeyframeArchive keyframe_archive_;
@@ -90,6 +101,8 @@ class SlidingWindowTracker {
     std::vector<PlaceNeighborhoodEventShadowState>
         previous_dt10_neighborhood_events_;
     size_t next_place_neighborhood_event_id_ = 1;
+    std::vector<PlaceRecoveryCommitReconciliationState>
+        active_place_recovery_commit_reconciliations_;
     size_t local_descriptor_keyframe_count_ = 0;
     std::unordered_set<size_t> orb_association_processed_;
     std::shared_ptr<Config> config;
