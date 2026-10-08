@@ -24,6 +24,85 @@ class CeresMarginalizationFactor : public MarginalizationFactor,
         }
     }
 
+    CeresMarginalizationFactor(
+        const CeresMarginalizationFactor &source,
+        const std::vector<Frame *> &rebased_frames)
+        : MarginalizationFactor(source) {
+        frames = rebased_frames;
+        set_num_residuals((int)frames.size() * ES_SIZE);
+        mutable_parameter_block_sizes()->clear();
+        for (size_t i = 0; i < frames.size(); ++i) {
+            mutable_parameter_block_sizes()->push_back(4); // q
+            mutable_parameter_block_sizes()->push_back(3); // p
+            mutable_parameter_block_sizes()->push_back(3); // v
+            mutable_parameter_block_sizes()->push_back(3); // bg
+            mutable_parameter_block_sizes()->push_back(3); // ba
+        }
+    }
+
+    std::unique_ptr<MarginalizationFactor> clone_rebased_world(
+        const std::vector<Frame *> &rebased_frames,
+        const quaternion &world_q,
+        const vector<3> &world_p) const override {
+        if (rebased_frames.size() != frames.size() ||
+            !world_q.coeffs().allFinite() ||
+            !world_p.allFinite() ||
+            !std::isfinite(world_q.norm()) ||
+            world_q.norm() <= 1.0e-12) {
+            return nullptr;
+        }
+
+        quaternion correction_q = world_q;
+        correction_q.normalize();
+        const matrix<3> correction_R =
+            correction_q.matrix();
+
+        auto rebased =
+            std::make_unique<CeresMarginalizationFactor>(
+                *this, rebased_frames);
+
+        for (size_t i = 0; i < frames.size(); ++i) {
+            rebased->pose_linearization_point[i].q =
+                correction_q *
+                pose_linearization_point[i].q;
+            rebased->pose_linearization_point[i].q.normalize();
+            rebased->pose_linearization_point[i].p =
+                correction_q *
+                    pose_linearization_point[i].p +
+                world_p;
+
+            rebased->motion_linearization_point[i].v =
+                correction_q *
+                motion_linearization_point[i].v;
+            // Gyroscope and accelerometer biases are body-frame quantities;
+            // the copied linearization values remain unchanged.
+        }
+
+        // For x' = [dq, R dp, R dv, dbg, dba], x' = T x.
+        // Preserve r = L x + b by using L' = L T^{-1} = L T^T.
+        const size_t residual_dimension =
+            frames.size() * ES_SIZE;
+        for (size_t i = 0; i < frames.size(); ++i) {
+            rebased->sqrt_inv_cov.block(
+                0, ES_SIZE * i + ES_P,
+                residual_dimension, 3) =
+                sqrt_inv_cov.block(
+                    0, ES_SIZE * i + ES_P,
+                    residual_dimension, 3) *
+                correction_R.transpose();
+            rebased->sqrt_inv_cov.block(
+                0, ES_SIZE * i + ES_V,
+                residual_dimension, 3) =
+                sqrt_inv_cov.block(
+                    0, ES_SIZE * i + ES_V,
+                    residual_dimension, 3) *
+                correction_R.transpose();
+        }
+
+        // infovec is already in residual coordinates and is gauge invariant.
+        return rebased;
+    }
+
     bool Evaluate(const double *const *parameters, double *residuals,
                   double **jacobians) const override {
         for (size_t i = 0; i < frames.size(); ++i) {

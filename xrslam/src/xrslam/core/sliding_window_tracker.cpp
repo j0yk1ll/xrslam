@@ -4427,6 +4427,7 @@ diagnose_place_recovery_commit_reconciliation() {
                 struct MarginalizationShadowResult {
                     bool usable = false;
                     bool prior_bound = false;
+                    bool prior_rebased = false;
                     bool complete = false;
                     size_t window_frames = 0;
                     size_t prior_frames = 0;
@@ -4450,6 +4451,7 @@ diagnose_place_recovery_commit_reconciliation() {
                      &recovery_rmse_px](
                         const quaternion &correction_q,
                         const vector<3> &correction_p,
+                        bool rebase_prior,
                         bool include_recovery) {
                         MarginalizationShadowResult result;
                         result.window_frames = map->frame_num();
@@ -4597,11 +4599,28 @@ diagnose_place_recovery_commit_reconciliation() {
                                 shadow_frames[source_index]);
                         }
 
+                        std::unique_ptr<MarginalizationFactor>
+                            rebased_prior;
+                        MarginalizationFactor *prior_factor =
+                            map->marginalization_factor.get();
+                        if (rebase_prior) {
+                            rebased_prior =
+                                map->marginalization_factor
+                                    ->clone_rebased_world(
+                                        shadow_prior_frames,
+                                        correction_q,
+                                        correction_p);
+                            if (!rebased_prior)
+                                return result;
+                            prior_factor =
+                                rebased_prior.get();
+                            result.prior_rebased = true;
+                        }
+
                         result.prior_bound =
                             solver
                                 ->add_marginalization_factor_for_frames(
-                                    map->marginalization_factor
-                                        .get(),
+                                    prior_factor,
                                     shadow_prior_frames);
                         if (!result.prior_bound)
                             return result;
@@ -4673,18 +4692,35 @@ diagnose_place_recovery_commit_reconciliation() {
                         run_marginalization_shadow(
                             identity_correction_q,
                             identity_correction_p,
+                            false,
                             false);
                 const MarginalizationShadowResult
                     yaw_marginalization =
                         run_marginalization_shadow(
                             yaw_correction_q,
                             yaw_correction_p,
+                            false,
                             false);
                 const MarginalizationShadowResult
                     yaw_marginalization_recovery =
                         run_marginalization_shadow(
                             yaw_correction_q,
                             yaw_correction_p,
+                            false,
+                            true);
+                const MarginalizationShadowResult
+                    yaw_rebased_marginalization =
+                        run_marginalization_shadow(
+                            yaw_correction_q,
+                            yaw_correction_p,
+                            true,
+                            false);
+                const MarginalizationShadowResult
+                    yaw_rebased_marginalization_recovery =
+                        run_marginalization_shadow(
+                            yaw_correction_q,
+                            yaw_correction_p,
+                            true,
                             true);
 
                 const auto marginalization_target_delta_seed_t =
@@ -4722,6 +4758,186 @@ diagnose_place_recovery_commit_reconciliation() {
                     camera_rotation_delta_deg(
                         identity_marginalization.target_pose,
                         yaw_marginalization.target_pose);
+
+                PoseState transformed_identity_target_pose;
+                transformed_identity_target_pose.q =
+                    yaw_correction_q *
+                    identity_marginalization.target_pose.q;
+                transformed_identity_target_pose.q.normalize();
+                transformed_identity_target_pose.p =
+                    yaw_correction_q *
+                        identity_marginalization.target_pose.p +
+                    yaw_correction_p;
+
+                MotionState transformed_identity_target_motion =
+                    identity_marginalization.target_motion;
+                transformed_identity_target_motion.v =
+                    yaw_correction_q *
+                    identity_marginalization.target_motion.v;
+
+                const double
+                    rebased_to_transformed_identity_t =
+                        (yaw_rebased_marginalization
+                             .target_pose.p -
+                         transformed_identity_target_pose.p)
+                            .norm();
+                const double
+                    rebased_to_transformed_identity_r =
+                        camera_rotation_delta_deg(
+                            transformed_identity_target_pose,
+                            yaw_rebased_marginalization
+                                .target_pose);
+                const double
+                    rebased_to_transformed_identity_v =
+                        (yaw_rebased_marginalization
+                             .target_motion.v -
+                         transformed_identity_target_motion.v)
+                            .norm();
+                const double
+                    rebased_to_transformed_identity_bg =
+                        (yaw_rebased_marginalization
+                             .target_motion.bg -
+                         transformed_identity_target_motion.bg)
+                            .norm();
+                const double
+                    rebased_to_transformed_identity_ba =
+                        (yaw_rebased_marginalization
+                             .target_motion.ba -
+                         transformed_identity_target_motion.ba)
+                            .norm();
+
+                std::fprintf(
+                    stderr,
+                    "[PlaceRecoveryMarginalizationRebaseShadow] "
+                    "event_id=%zu commit_frame=%zu "
+                    "commit_t=%.9f latest_refined_frame=%zu "
+                    "topology=active_top_level_window "
+                    "visual_factors=0 "
+                    "window_frames=%zu prior_frames=%zu "
+                    "target_window_index=%zu "
+                    "yaw_correction_deg=%.9f "
+                    "rebase_rule=left_yaw_translation_"
+                    "linpoint_qpv_sqrtinfo_pv "
+                    "identity_target_delta_seed_t=%.9f "
+                    "identity_target_delta_seed_r_deg=%.9f "
+                    "original_yaw_target_delta_seed_t=%.9f "
+                    "original_yaw_target_delta_seed_r_deg=%.9f "
+                    "rebased_usable=%d "
+                    "rebased_prior_bound=%d "
+                    "rebased_prior_rebased=%d "
+                    "rebased_complete=%d "
+                    "rebased_imu_edges=%zu "
+                    "rebased_target_delta_seed_t=%.9f "
+                    "rebased_target_delta_seed_r_deg=%.9f "
+                    "rebased_max_delta_seed_t=%.9f "
+                    "rebased_max_delta_seed_r_deg=%.9f "
+                    "rebased_max_v_delta=%.9f "
+                    "rebased_target_to_committed_t=%.9f "
+                    "rebased_target_to_committed_r_deg=%.9f "
+                    "rebased_to_transformed_identity_t=%.9f "
+                    "rebased_to_transformed_identity_r_deg=%.9f "
+                    "rebased_to_transformed_identity_v=%.9f "
+                    "rebased_to_transformed_identity_bg=%.9f "
+                    "rebased_to_transformed_identity_ba=%.9f "
+                    "rebased_recovery_usable=%d "
+                    "rebased_recovery_prior_bound=%d "
+                    "rebased_recovery_prior_rebased=%d "
+                    "rebased_recovery_complete=%d "
+                    "rebased_recovery_imu_edges=%zu "
+                    "rebased_recovery_factors=%zu "
+                    "rebased_recovery_rmse_px=%.9f "
+                    "rebased_recovery_target_delta_seed_t=%.9f "
+                    "rebased_recovery_target_delta_seed_r_deg=%.9f "
+                    "rebased_recovery_max_delta_seed_t=%.9f "
+                    "rebased_recovery_max_delta_seed_r_deg=%.9f "
+                    "rebased_recovery_max_v_delta=%.9f "
+                    "rebased_recovery_target_to_committed_t=%.9f "
+                    "rebased_recovery_target_to_committed_r_deg=%.9f "
+                    "infovec_transform=unchanged "
+                    "marginalization_source=live_clone_rebased "
+                    "state_mutation=0\n",
+                    state.event_id,
+                    state.frame_id,
+                    state.timestamp,
+                    latest_refined_frame_id,
+                    yaw_rebased_marginalization.window_frames,
+                    yaw_rebased_marginalization.prior_frames,
+                    yaw_rebased_marginalization.target_index,
+                    std::abs(yaw_correction_rad) *
+                        180.0 / M_PI,
+                    marginalization_target_delta_seed_t(
+                        identity_marginalization),
+                    marginalization_target_delta_seed_r(
+                        identity_marginalization),
+                    marginalization_target_delta_seed_t(
+                        yaw_marginalization),
+                    marginalization_target_delta_seed_r(
+                        yaw_marginalization),
+                    yaw_rebased_marginalization.usable ? 1 : 0,
+                    yaw_rebased_marginalization.prior_bound
+                        ? 1
+                        : 0,
+                    yaw_rebased_marginalization.prior_rebased
+                        ? 1
+                        : 0,
+                    yaw_rebased_marginalization.complete
+                        ? 1
+                        : 0,
+                    yaw_rebased_marginalization.imu_edges,
+                    marginalization_target_delta_seed_t(
+                        yaw_rebased_marginalization),
+                    marginalization_target_delta_seed_r(
+                        yaw_rebased_marginalization),
+                    yaw_rebased_marginalization
+                        .max_pose_delta_seed_t,
+                    yaw_rebased_marginalization
+                        .max_pose_delta_seed_r_deg,
+                    yaw_rebased_marginalization.max_v_delta,
+                    marginalization_target_to_committed_t(
+                        yaw_rebased_marginalization),
+                    marginalization_target_to_committed_r(
+                        yaw_rebased_marginalization),
+                    rebased_to_transformed_identity_t,
+                    rebased_to_transformed_identity_r,
+                    rebased_to_transformed_identity_v,
+                    rebased_to_transformed_identity_bg,
+                    rebased_to_transformed_identity_ba,
+                    yaw_rebased_marginalization_recovery
+                            .usable
+                        ? 1
+                        : 0,
+                    yaw_rebased_marginalization_recovery
+                            .prior_bound
+                        ? 1
+                        : 0,
+                    yaw_rebased_marginalization_recovery
+                            .prior_rebased
+                        ? 1
+                        : 0,
+                    yaw_rebased_marginalization_recovery
+                            .complete
+                        ? 1
+                        : 0,
+                    yaw_rebased_marginalization_recovery
+                        .imu_edges,
+                    yaw_rebased_marginalization_recovery
+                        .recovery_factors,
+                    yaw_rebased_marginalization_recovery
+                        .recovery_rmse_px,
+                    marginalization_target_delta_seed_t(
+                        yaw_rebased_marginalization_recovery),
+                    marginalization_target_delta_seed_r(
+                        yaw_rebased_marginalization_recovery),
+                    yaw_rebased_marginalization_recovery
+                        .max_pose_delta_seed_t,
+                    yaw_rebased_marginalization_recovery
+                        .max_pose_delta_seed_r_deg,
+                    yaw_rebased_marginalization_recovery
+                        .max_v_delta,
+                    marginalization_target_to_committed_t(
+                        yaw_rebased_marginalization_recovery),
+                    marginalization_target_to_committed_r(
+                        yaw_rebased_marginalization_recovery));
 
                 std::fprintf(
                     stderr,

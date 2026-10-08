@@ -12,9 +12,21 @@ class MarginalizationFactor {
     virtual ~MarginalizationFactor() = default;
     virtual void marginalize(size_t index) = 0;
 
+    // Clone the stored prior into a new world gauge. Concrete backends that
+    // support this must transform both their linearization state and
+    // information basis. The default keeps non-inertial backends unchanged.
+    virtual std::unique_ptr<MarginalizationFactor> clone_rebased_world(
+        const std::vector<Frame *> &rebased_frames,
+        const quaternion &world_q,
+        const vector<3> &world_p) const {
+        return nullptr;
+    }
+
     const std::vector<Frame *> &linearization_frames() const { return frames; }
 
   protected:
+    MarginalizationFactor(const MarginalizationFactor &) = default;
+
     MarginalizationFactor(Map *map) : base_map(map) {
         frames.resize(map->frame_num() - 1);
         pose_linearization_point.resize(map->frame_num() - 1);
