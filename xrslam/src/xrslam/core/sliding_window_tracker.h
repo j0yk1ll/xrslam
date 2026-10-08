@@ -75,7 +75,10 @@ class SlidingWindowTracker {
         PoseState precommit_body_pose;
         PoseState committed_body_pose;
         MotionState committed_motion;
+        std::vector<vector<3>> recovery_landmarks_world;
+        std::vector<vector<2>> recovery_observations_pixel;
         size_t samples_emitted = 0;
+        bool factor_shadow_emitted = false;
     };
 
     void archive_optimized_keyframes();

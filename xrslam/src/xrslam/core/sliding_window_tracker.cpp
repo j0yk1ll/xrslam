@@ -45,6 +45,12 @@ bool place_recovery_commit_enabled() {
     return value && std::string(value) == "1";
 }
 
+bool place_recovery_factor_shadow_enabled() {
+    const char *value =
+        std::getenv("XRSLAM_PLACE_RECOVERY_FACTOR_SHADOW");
+    return value && std::string(value) == "1";
+}
+
 bool place_descriptor_shadow_enabled() {
     const char *value =
         std::getenv("XRSLAM_PLACE_DESCRIPTOR_SHADOW");
@@ -2901,6 +2907,10 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
                                 authoritative_body_pose;
                             reconciliation.committed_body_pose = frame->pose;
                             reconciliation.committed_motion = frame->motion;
+                            reconciliation.recovery_landmarks_world =
+                                representative.inlier_landmarks_world;
+                            reconciliation.recovery_observations_pixel =
+                                representative.inlier_observations_pixel;
                             active_place_recovery_commit_reconciliations_
                                 .emplace_back(std::move(reconciliation));
                         }
@@ -3070,6 +3080,7 @@ diagnose_place_recovery_commit_reconciliation() {
     for (auto &state :
          active_place_recovery_commit_reconciliations_) {
         Frame *target = nullptr;
+        size_t target_top_index = nil();
         bool target_is_top_level = false;
 
         for (size_t i = 0;
@@ -3082,6 +3093,7 @@ diagnose_place_recovery_commit_reconciliation() {
             if (top->id() == state.frame_id) {
                 target = top;
                 target_is_top_level = true;
+                target_top_index = i;
                 break;
             }
 
@@ -3107,6 +3119,369 @@ diagnose_place_recovery_commit_reconciliation() {
                 state.timestamp,
                 state.samples_emitted);
             continue;
+        }
+
+        if (place_recovery_factor_shadow_enabled() &&
+            !state.factor_shadow_emitted) {
+            state.factor_shadow_emitted = true;
+
+            if (!target_is_top_level ||
+                target_top_index == nil() ||
+                state.recovery_landmarks_world.empty() ||
+                state.recovery_landmarks_world.size() !=
+                    state.recovery_observations_pixel.size()) {
+                const char *reject_reason =
+                    !target_is_top_level
+                        ? "target_not_top_level"
+                    : target_top_index == nil()
+                        ? "target_index_unavailable"
+                    : state.recovery_landmarks_world.empty()
+                        ? "recovery_observations_empty"
+                        : "recovery_observation_size_mismatch";
+
+                std::fprintf(
+                    stderr,
+                    "[PlaceRecoveryFactorIntegrationShadow] "
+                    "event_id=%zu commit_frame=%zu "
+                    "commit_t=%.9f "
+                    "reject=%s "
+                    "topology=localize_single_frame "
+                    "marginalization_prior=0 "
+                    "state_mutation=0\\n",
+                    state.event_id,
+                    state.frame_id,
+                    state.timestamp,
+                    reject_reason);
+            } else {
+                struct FactorShadowResult {
+                    bool usable = false;
+                    bool imu_prior = false;
+                    size_t conventional_visual_factors = 0;
+                    size_t recovery_factors = 0;
+                    size_t self_anchor_skipped = 0;
+                    PoseState pose;
+                    MotionState motion;
+                    double recovery_rmse_px =
+                        std::numeric_limits<double>::quiet_NaN();
+                };
+
+                const auto recovery_rmse_px =
+                    [&state, target](
+                        const PoseState &body_pose) {
+                        PoseState camera_pose;
+                        camera_pose.q =
+                            body_pose.q * target->camera.q_cs;
+                        camera_pose.p =
+                            body_pose.p +
+                            body_pose.q * target->camera.p_cs;
+
+                        double squared_error = 0.0;
+                        size_t positive_depth_count = 0;
+                        for (size_t i = 0;
+                             i < state.recovery_landmarks_world.size();
+                             ++i) {
+                            const vector<3> point_camera =
+                                camera_pose.q.conjugate() *
+                                (state.recovery_landmarks_world[i] -
+                                 camera_pose.p);
+                            if (!point_camera.allFinite() ||
+                                point_camera.z() <= 1.0e-6) {
+                                continue;
+                            }
+
+                            const vector<2> projected =
+                                apply_k(point_camera, target->K);
+                            const double error =
+                                (projected -
+                                 state.recovery_observations_pixel[i])
+                                    .norm();
+                            squared_error += error * error;
+                            ++positive_depth_count;
+                        }
+
+                        if (positive_depth_count == 0) {
+                            return std::numeric_limits<
+                                double>::quiet_NaN();
+                        }
+                        return std::sqrt(
+                            squared_error /
+                            static_cast<double>(
+                                positive_depth_count));
+                    };
+
+                const auto run_factor_shadow =
+                    [this, target, target_top_index, &state,
+                     &recovery_rmse_px](
+                        bool include_recovery) {
+                        FactorShadowResult result;
+                        result.pose = target->pose;
+                        result.motion = target->motion;
+
+                        auto shadow_map =
+                            std::make_unique<Map>();
+                        std::unique_ptr<Frame> target_owner =
+                            target->clone();
+                        Frame *shadow_target = target_owner.get();
+                        shadow_target->tag(FT_FIX_POSE) = false;
+                        shadow_target->tag(FT_FIX_MOTION) = false;
+                        shadow_map->attach_frame(
+                            std::move(target_owner));
+
+                        auto solver = Solver::create();
+                        solver->add_frame_states(shadow_target);
+
+                        PreIntegrator shadow_preintegration;
+                        if (config->has_imu() &&
+                            target_top_index > 0) {
+                            Frame *previous =
+                                map->get_frame(
+                                    target_top_index - 1);
+                            shadow_preintegration =
+                                target->keyframe_preintegration;
+                            if (previous &&
+                                shadow_preintegration.integrate(
+                                    target->image->t,
+                                    previous->motion.bg,
+                                    previous->motion.ba,
+                                    true, true)) {
+                                solver->put_factor(
+                                    Solver::
+                                        create_preintegration_prior_factor(
+                                            previous,
+                                            shadow_target,
+                                            shadow_preintegration));
+                                result.imu_prior = true;
+                            }
+                        }
+
+                        std::vector<Frame *> anchor_sources;
+                        std::vector<Frame *> anchor_copies;
+
+                        const auto get_anchor_copy =
+                            [&shadow_map,
+                             &anchor_sources,
+                             &anchor_copies](
+                                Frame *source) {
+                                for (size_t i = 0;
+                                     i < anchor_sources.size();
+                                     ++i) {
+                                    if (anchor_sources[i] ==
+                                        source) {
+                                        return anchor_copies[i];
+                                    }
+                                }
+
+                                std::unique_ptr<Frame> owner =
+                                    source->clone();
+                                Frame *copy = owner.get();
+                                shadow_map->attach_frame(
+                                    std::move(owner));
+                                anchor_sources.emplace_back(
+                                    source);
+                                anchor_copies.emplace_back(copy);
+                                return copy;
+                            };
+
+                        for (size_t k = 0;
+                             k < target->keypoint_num();
+                             ++k) {
+                            Track *source_track =
+                                target->get_track(k);
+                            if (!source_track ||
+                                !source_track->all_tagged(
+                                    TT_VALID,
+                                    TT_TRIANGULATED,
+                                    TT_STATIC)) {
+                                continue;
+                            }
+
+                            Frame *source_anchor =
+                                source_track->first_frame();
+                            if (!source_anchor ||
+                                source_anchor == target) {
+                                ++result.self_anchor_skipped;
+                                continue;
+                            }
+
+                            const size_t anchor_index =
+                                source_track
+                                    ->get_keypoint_index(
+                                        source_anchor);
+                            if (anchor_index == nil() ||
+                                anchor_index >=
+                                    source_anchor
+                                        ->keypoint_num()) {
+                                continue;
+                            }
+
+                            Frame *shadow_anchor =
+                                get_anchor_copy(source_anchor);
+                            Track *shadow_track =
+                                shadow_map->create_track();
+                            shadow_track->add_keypoint(
+                                shadow_anchor,
+                                anchor_index);
+                            shadow_track->add_keypoint(
+                                shadow_target, k);
+                            shadow_track->landmark =
+                                source_track->landmark;
+                            shadow_track->tag(TT_VALID) = true;
+                            shadow_track->tag(
+                                TT_TRIANGULATED) = true;
+                            shadow_track->tag(TT_STATIC) = true;
+                            shadow_track->tag(
+                                TT_FIX_INVD) = true;
+
+                            solver->put_factor(
+                                Solver::
+                                    create_reprojection_prior_factor(
+                                        shadow_target,
+                                        shadow_track));
+                            ++result.conventional_visual_factors;
+                        }
+
+                        if (include_recovery) {
+                            for (size_t i = 0;
+                                 i < state
+                                         .recovery_landmarks_world.size();
+                                 ++i) {
+                                solver
+                                    ->add_learned_world_reprojection(
+                                        shadow_target,
+                                        state
+                                            .recovery_landmarks_world[i],
+                                        state
+                                            .recovery_observations_pixel[i]);
+                                ++result.recovery_factors;
+                            }
+                        }
+
+                        result.usable = solver->solve();
+                        result.pose = shadow_target->pose;
+                        result.motion = shadow_target->motion;
+                        result.recovery_rmse_px =
+                            recovery_rmse_px(
+                                shadow_target->pose);
+                        return result;
+                    };
+
+                const double current_recovery_rmse_px =
+                    recovery_rmse_px(target->pose);
+                const FactorShadowResult baseline =
+                    run_factor_shadow(false);
+                const FactorShadowResult augmented =
+                    run_factor_shadow(true);
+
+                const double baseline_delta_current_t =
+                    (baseline.pose.p - target->pose.p).norm();
+                const double baseline_delta_current_r =
+                    camera_rotation_delta_deg(
+                        target->pose, baseline.pose);
+                const double augmented_delta_current_t =
+                    (augmented.pose.p - target->pose.p).norm();
+                const double augmented_delta_current_r =
+                    camera_rotation_delta_deg(
+                        target->pose, augmented.pose);
+                const double augmented_delta_baseline_t =
+                    (augmented.pose.p - baseline.pose.p).norm();
+                const double augmented_delta_baseline_r =
+                    camera_rotation_delta_deg(
+                        baseline.pose, augmented.pose);
+
+                const double augmented_to_committed_t =
+                    (augmented.pose.p -
+                     state.committed_body_pose.p)
+                        .norm();
+                const double augmented_to_committed_r =
+                    camera_rotation_delta_deg(
+                        state.committed_body_pose,
+                        augmented.pose);
+                const double augmented_to_precommit_t =
+                    (augmented.pose.p -
+                     state.precommit_body_pose.p)
+                        .norm();
+                const double augmented_to_precommit_r =
+                    camera_rotation_delta_deg(
+                        state.precommit_body_pose,
+                        augmented.pose);
+
+                const double baseline_v_delta =
+                    (baseline.motion.v - target->motion.v).norm();
+                const double baseline_bg_delta =
+                    (baseline.motion.bg - target->motion.bg).norm();
+                const double baseline_ba_delta =
+                    (baseline.motion.ba - target->motion.ba).norm();
+                const double augmented_v_delta =
+                    (augmented.motion.v - target->motion.v).norm();
+                const double augmented_bg_delta =
+                    (augmented.motion.bg - target->motion.bg).norm();
+                const double augmented_ba_delta =
+                    (augmented.motion.ba - target->motion.ba).norm();
+
+                std::fprintf(
+                    stderr,
+                    "[PlaceRecoveryFactorIntegrationShadow] "
+                    "event_id=%zu commit_frame=%zu "
+                    "commit_t=%.9f "
+                    "latest_refined_frame=%zu "
+                    "topology=localize_single_frame "
+                    "marginalization_prior=0 "
+                    "conventional_visual_factors=%zu "
+                    "self_anchor_skipped=%zu "
+                    "imu_prior=%d "
+                    "recovery_factors=%zu "
+                    "baseline_usable=%d "
+                    "augmented_usable=%d "
+                    "current_recovery_rmse_px=%.9f "
+                    "baseline_recovery_rmse_px=%.9f "
+                    "augmented_recovery_rmse_px=%.9f "
+                    "baseline_delta_current_t=%.9f "
+                    "baseline_delta_current_r_deg=%.9f "
+                    "augmented_delta_current_t=%.9f "
+                    "augmented_delta_current_r_deg=%.9f "
+                    "augmented_delta_baseline_t=%.9f "
+                    "augmented_delta_baseline_r_deg=%.9f "
+                    "augmented_to_committed_t=%.9f "
+                    "augmented_to_committed_r_deg=%.9f "
+                    "augmented_to_precommit_t=%.9f "
+                    "augmented_to_precommit_r_deg=%.9f "
+                    "baseline_v_delta=%.9f "
+                    "baseline_bg_delta=%.9f "
+                    "baseline_ba_delta=%.9f "
+                    "augmented_v_delta=%.9f "
+                    "augmented_bg_delta=%.9f "
+                    "augmented_ba_delta=%.9f "
+                    "state_mutation=0\\n",
+                    state.event_id,
+                    state.frame_id,
+                    state.timestamp,
+                    latest_refined_frame_id,
+                    augmented.conventional_visual_factors,
+                    augmented.self_anchor_skipped,
+                    augmented.imu_prior ? 1 : 0,
+                    augmented.recovery_factors,
+                    baseline.usable ? 1 : 0,
+                    augmented.usable ? 1 : 0,
+                    current_recovery_rmse_px,
+                    baseline.recovery_rmse_px,
+                    augmented.recovery_rmse_px,
+                    baseline_delta_current_t,
+                    baseline_delta_current_r,
+                    augmented_delta_current_t,
+                    augmented_delta_current_r,
+                    augmented_delta_baseline_t,
+                    augmented_delta_baseline_r,
+                    augmented_to_committed_t,
+                    augmented_to_committed_r,
+                    augmented_to_precommit_t,
+                    augmented_to_precommit_r,
+                    baseline_v_delta,
+                    baseline_bg_delta,
+                    baseline_ba_delta,
+                    augmented_v_delta,
+                    augmented_bg_delta,
+                    augmented_ba_delta);
+            }
         }
 
         const double current_to_committed_t =
