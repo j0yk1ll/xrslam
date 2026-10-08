@@ -2349,6 +2349,10 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
                         representative.abs_timestamp_separation >= 10.0
                             ? 1
                             : 0);
+                    const PoseState authoritative_body_pose =
+                        frame->pose;
+                    const MotionState authoritative_motion =
+                        frame->motion;
                     const PoseState authoritative_camera_pose =
                         frame->get_pose(frame->camera);
 
@@ -2640,6 +2644,117 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
                         recovery_delta_authoritative_r,
                         recovery_delta_seed_t,
                         recovery_delta_seed_r);
+
+                    if (acceptance_candidate) {
+                        const PoseState live_body_pose_after_shadow =
+                            frame->pose;
+                        const MotionState live_motion_after_shadow =
+                            frame->motion;
+
+                        const double commit_delta_t =
+                            (recovery_body_pose.p -
+                             authoritative_body_pose.p)
+                                .norm();
+                        const double commit_delta_r =
+                            camera_rotation_delta_deg(
+                                authoritative_body_pose,
+                                recovery_body_pose);
+
+                        const double live_pose_delta_t =
+                            (live_body_pose_after_shadow.p -
+                             authoritative_body_pose.p)
+                                .norm();
+                        const double live_q_coeff_delta =
+                            (live_body_pose_after_shadow.q.coeffs() -
+                             authoritative_body_pose.q.coeffs())
+                                .norm();
+                        const double live_pose_delta_r =
+                            camera_rotation_delta_deg(
+                                authoritative_body_pose,
+                                live_body_pose_after_shadow);
+                        const double live_v_delta =
+                            (live_motion_after_shadow.v -
+                             authoritative_motion.v)
+                                .norm();
+                        const double live_bg_delta =
+                            (live_motion_after_shadow.bg -
+                             authoritative_motion.bg)
+                                .norm();
+                        const double live_ba_delta =
+                            (live_motion_after_shadow.ba -
+                             authoritative_motion.ba)
+                                .norm();
+
+                        const bool live_state_unchanged =
+                            live_pose_delta_t == 0.0 &&
+                            live_q_coeff_delta == 0.0 &&
+                            live_v_delta == 0.0 &&
+                            live_bg_delta == 0.0 &&
+                            live_ba_delta == 0.0;
+
+                        std::fprintf(
+                            stderr,
+                            "[PlaceRecoveryCommitDryRun] "
+                            "current=%zu t=%.9f event_id=%zu "
+                            "acceptance_candidate=1 "
+                            "commit_scope=pose_only "
+                            "authoritative_body_p=%.9f,%.9f,%.9f "
+                            "authoritative_body_q=%.9f,%.9f,%.9f,%.9f "
+                            "proposed_body_p=%.9f,%.9f,%.9f "
+                            "proposed_body_q=%.9f,%.9f,%.9f,%.9f "
+                            "commit_delta_t=%.9f "
+                            "commit_delta_r_deg=%.9f "
+                            "preserved_v=%.9f,%.9f,%.9f "
+                            "preserved_bg=%.9f,%.9f,%.9f "
+                            "preserved_ba=%.9f,%.9f,%.9f "
+                            "live_pose_delta_t=%.9f "
+                            "live_q_coeff_delta=%.9f "
+                            "live_pose_delta_r_deg=%.9f "
+                            "live_v_delta=%.9f "
+                            "live_bg_delta=%.9f "
+                            "live_ba_delta=%.9f "
+                            "live_state_unchanged=%d "
+                            "would_commit_pose=1 "
+                            "would_preserve_v=1 "
+                            "would_preserve_bg=1 "
+                            "would_preserve_ba=1 "
+                            "estimator_reset=0 loop_constraint=0 "
+                            "commit_applied=0 state_mutation=0\n",
+                            frame->id(), frame->image->t,
+                            group.event_id,
+                            authoritative_body_pose.p.x(),
+                            authoritative_body_pose.p.y(),
+                            authoritative_body_pose.p.z(),
+                            authoritative_body_pose.q.x(),
+                            authoritative_body_pose.q.y(),
+                            authoritative_body_pose.q.z(),
+                            authoritative_body_pose.q.w(),
+                            recovery_body_pose.p.x(),
+                            recovery_body_pose.p.y(),
+                            recovery_body_pose.p.z(),
+                            recovery_body_pose.q.x(),
+                            recovery_body_pose.q.y(),
+                            recovery_body_pose.q.z(),
+                            recovery_body_pose.q.w(),
+                            commit_delta_t,
+                            commit_delta_r,
+                            authoritative_motion.v.x(),
+                            authoritative_motion.v.y(),
+                            authoritative_motion.v.z(),
+                            authoritative_motion.bg.x(),
+                            authoritative_motion.bg.y(),
+                            authoritative_motion.bg.z(),
+                            authoritative_motion.ba.x(),
+                            authoritative_motion.ba.y(),
+                            authoritative_motion.ba.z(),
+                            live_pose_delta_t,
+                            live_q_coeff_delta,
+                            live_pose_delta_r,
+                            live_v_delta,
+                            live_bg_delta,
+                            live_ba_delta,
+                            live_state_unchanged ? 1 : 0);
+                    }
                 }
             }
         };
