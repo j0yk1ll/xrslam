@@ -1263,6 +1263,8 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
         size_t correspondence_count = 0;
         size_t inlier_count = 0;
         double inlier_ratio = 0.0;
+        std::vector<vector<3>> inlier_landmarks_world;
+        std::vector<vector<2>> inlier_observations_pixel;
         PoseState pnp_camera_pose;
         double translation_delta_m = 0.0;
         double rotation_delta_deg = 0.0;
@@ -1646,11 +1648,20 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
 
             double inlier_squared_error = 0.0;
             size_t positive_depth_inliers = 0;
+            std::vector<vector<3>> inlier_landmarks_world;
+            std::vector<vector<2>> inlier_observations_pixel;
+            inlier_landmarks_world.reserve(inlier_count);
+            inlier_observations_pixel.reserve(inlier_count);
             for (size_t i = 0;
                  i < correspondence_count;
                  ++i) {
                 if (!inlier_mask[i])
                     continue;
+
+                inlier_landmarks_world.emplace_back(
+                    pnp_points_world[i]);
+                inlier_observations_pixel.emplace_back(
+                    pnp_points_pixel[i]);
 
                 const vector<3> point_camera =
                     R_cw * pnp_points_world[i] +
@@ -1741,6 +1752,8 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
                         correspondence_count,
                         inlier_count,
                         inlier_ratio,
+                        std::move(inlier_landmarks_world),
+                        std::move(inlier_observations_pixel),
                         pnp_camera_pose,
                         translation_delta_m,
                         rotation_delta_deg,
@@ -2336,6 +2349,204 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
                         representative.abs_timestamp_separation >= 10.0
                             ? 1
                             : 0);
+                    const PoseState authoritative_camera_pose =
+                        frame->get_pose(frame->camera);
+
+                    std::unique_ptr<Frame> recovery_frame =
+                        frame->clone();
+                    recovery_frame->tag(FT_FIX_POSE) = false;
+
+                    recovery_frame->pose.q =
+                        representative.pnp_camera_pose.q *
+                        recovery_frame->camera.q_cs.conjugate();
+                    recovery_frame->pose.q.normalize();
+                    recovery_frame->pose.p =
+                        representative.pnp_camera_pose.p -
+                        recovery_frame->pose.q *
+                            recovery_frame->camera.p_cs;
+
+                    const PoseState pnp_seed_camera_pose =
+                        recovery_frame->get_pose(
+                            recovery_frame->camera);
+
+                    const auto reprojection_rmse_px =
+                        [frame, &representative](
+                            const PoseState &camera_pose) {
+                            if (representative
+                                    .inlier_landmarks_world.empty() ||
+                                representative
+                                        .inlier_landmarks_world.size() !=
+                                    representative
+                                        .inlier_observations_pixel.size()) {
+                                return std::numeric_limits<
+                                    double>::quiet_NaN();
+                            }
+
+                            double squared_error = 0.0;
+                            size_t positive_depth_count = 0;
+                            for (size_t j = 0;
+                                 j < representative
+                                         .inlier_landmarks_world.size();
+                                 ++j) {
+                                const vector<3> point_camera =
+                                    camera_pose.q.conjugate() *
+                                    (representative
+                                         .inlier_landmarks_world[j] -
+                                     camera_pose.p);
+                                if (!point_camera.allFinite() ||
+                                    point_camera.z() <= 1.0e-6) {
+                                    continue;
+                                }
+
+                                const vector<2> projected =
+                                    apply_k(
+                                        point_camera,
+                                        frame->K);
+                                const double error =
+                                    (projected -
+                                     representative
+                                         .inlier_observations_pixel[j])
+                                        .norm();
+                                squared_error += error * error;
+                                ++positive_depth_count;
+                            }
+
+                            if (positive_depth_count == 0) {
+                                return std::numeric_limits<
+                                    double>::quiet_NaN();
+                            }
+                            return std::sqrt(
+                                squared_error /
+                                static_cast<double>(
+                                    positive_depth_count));
+                        };
+
+                    const double pnp_seed_rmse_px =
+                        reprojection_rmse_px(
+                            pnp_seed_camera_pose);
+
+                    auto recovery_solver = Solver::create();
+                    recovery_solver->add_frame_states(
+                        recovery_frame.get(), false);
+
+                    size_t fixed_world_factor_count = 0;
+                    for (size_t j = 0;
+                         j < representative
+                                 .inlier_landmarks_world.size();
+                         ++j) {
+                        recovery_solver
+                            ->add_learned_world_reprojection(
+                                recovery_frame.get(),
+                                representative
+                                    .inlier_landmarks_world[j],
+                                representative
+                                    .inlier_observations_pixel[j]);
+                        ++fixed_world_factor_count;
+                    }
+
+                    const bool recovery_usable =
+                        fixed_world_factor_count >= 6 &&
+                        recovery_solver->solve();
+
+                    const PoseState recovery_body_pose =
+                        recovery_frame->pose;
+                    const PoseState recovery_camera_pose =
+                        recovery_frame->get_pose(
+                            recovery_frame->camera);
+                    const double recovery_rmse_px =
+                        reprojection_rmse_px(
+                            recovery_camera_pose);
+
+                    const double seed_delta_authoritative_t =
+                        (pnp_seed_camera_pose.p -
+                         authoritative_camera_pose.p)
+                            .norm();
+                    const double seed_delta_authoritative_r =
+                        camera_rotation_delta_deg(
+                            authoritative_camera_pose,
+                            pnp_seed_camera_pose);
+                    const double recovery_delta_authoritative_t =
+                        (recovery_camera_pose.p -
+                         authoritative_camera_pose.p)
+                            .norm();
+                    const double recovery_delta_authoritative_r =
+                        camera_rotation_delta_deg(
+                            authoritative_camera_pose,
+                            recovery_camera_pose);
+                    const double recovery_delta_seed_t =
+                        (recovery_camera_pose.p -
+                         pnp_seed_camera_pose.p)
+                            .norm();
+                    const double recovery_delta_seed_r =
+                        camera_rotation_delta_deg(
+                            pnp_seed_camera_pose,
+                            recovery_camera_pose);
+
+                    const bool candidate_finite =
+                        recovery_body_pose.p.allFinite() &&
+                        recovery_body_pose.q.coeffs().allFinite() &&
+                        recovery_camera_pose.p.allFinite() &&
+                        recovery_camera_pose.q.coeffs().allFinite() &&
+                        std::isfinite(recovery_rmse_px);
+
+                    std::fprintf(
+                        stderr,
+                        "[PlaceRecoverySolveShadow] "
+                        "current=%zu t=%.9f event_id=%zu "
+                        "confirmation_age=%zu "
+                        "representative_key=%llu "
+                        "representative_frame=%zu "
+                        "fixed_world_factors=%zu "
+                        "pnp_inliers=%zu pnp_ratio=%.6f "
+                        "solver_usable=%d candidate_finite=%d "
+                        "pnp_seed_rmse_px=%.6f "
+                        "recovery_rmse_px=%.6f "
+                        "seed_delta_authoritative_t=%.9f "
+                        "seed_delta_authoritative_r_deg=%.9f "
+                        "recovery_delta_authoritative_t=%.9f "
+                        "recovery_delta_authoritative_r_deg=%.9f "
+                        "recovery_delta_seed_t=%.9f "
+                        "recovery_delta_seed_r_deg=%.9f "
+                        "candidate_body_p=%.9f,%.9f,%.9f "
+                        "candidate_body_q=%.9f,%.9f,%.9f,%.9f "
+                        "candidate_camera_p=%.9f,%.9f,%.9f "
+                        "candidate_camera_q=%.9f,%.9f,%.9f,%.9f "
+                        "fixed_world_cauchy=2.448 "
+                        "motion_source=authoritative_unchanged "
+                        "acceptance_applied=0 state_mutation=0\n",
+                        frame->id(), frame->image->t,
+                        group.event_id,
+                        group.consecutive_age,
+                        static_cast<unsigned long long>(
+                            representative.key),
+                        representative.reference_frame_id,
+                        fixed_world_factor_count,
+                        representative.inlier_count,
+                        representative.inlier_ratio,
+                        recovery_usable ? 1 : 0,
+                        candidate_finite ? 1 : 0,
+                        pnp_seed_rmse_px,
+                        recovery_rmse_px,
+                        seed_delta_authoritative_t,
+                        seed_delta_authoritative_r,
+                        recovery_delta_authoritative_t,
+                        recovery_delta_authoritative_r,
+                        recovery_delta_seed_t,
+                        recovery_delta_seed_r,
+                        recovery_body_pose.p.x(),
+                        recovery_body_pose.p.y(),
+                        recovery_body_pose.p.z(),
+                        recovery_body_pose.q.x(),
+                        recovery_body_pose.q.y(),
+                        recovery_body_pose.q.z(),
+                        recovery_body_pose.q.w(),
+                        recovery_camera_pose.p.x(),
+                        recovery_camera_pose.p.y(),
+                        recovery_camera_pose.p.z(),
+                        recovery_camera_pose.q.x(),
+                        recovery_camera_pose.q.y(),
+                        recovery_camera_pose.q.z(),
+                        recovery_camera_pose.q.w());
                 }
             }
         };
