@@ -3442,127 +3442,412 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
                                 ? 1
                                 : 0);
 
-                        if (commit_enabled &&
-                            !commit_preconditions_met) {
-                            const char *skip_reason =
-                                !target_is_latest
-                                    ? "target_not_latest"
-                                : target_has_subframes
-                                    ? "target_has_subframes"
-                                : !live_state_unchanged
-                                    ? "precommit_state_changed"
-                                : "unknown";
+                        if (commit_enabled) {
+                            // Prepare a second rebased prior bound to the
+                            // actual live frame storage. The 0110k shadow
+                            // prior is clone-bound and must never be moved
+                            // into the estimator.
+                            std::unique_ptr<MarginalizationFactor>
+                                live_rebased_prior;
+                            if (coherent_dry_run_ready &&
+                                map->marginalization_factor) {
+                                live_rebased_prior =
+                                    map->marginalization_factor
+                                        ->clone_rebased_world(
+                                            live_prior_frames,
+                                            coherent_yaw_q,
+                                            coherent_translation);
+                            }
 
-                            std::fprintf(
-                                stderr,
-                                "[PlaceRecoveryCommit] "
-                                "current=%zu t=%.9f event_id=%zu "
-                                "commit_scope=pose_only "
-                                "commit_enabled=1 "
-                                "commit_preconditions_met=0 "
-                                "reason=%s "
-                                "target_is_latest=%d "
-                                "target_has_subframes=%d "
-                                "motion_preserved=1 "
-                                "estimator_reset=0 loop_constraint=0 "
-                                "commit_applied=0 state_mutation=0\n",
-                                frame->id(), frame->image->t,
-                                group.event_id,
-                                skip_reason,
-                                target_is_latest ? 1 : 0,
-                                target_has_subframes ? 1 : 0);
-                        } else if (
-                            commit_enabled &&
-                            commit_preconditions_met) {
-                            const MotionState motion_before_commit =
-                                frame->motion;
+                            const bool live_rebased_prior_ready =
+                                live_rebased_prior != nullptr;
+                            const bool coherent_commit_preconditions_met =
+                                coherent_dry_run_ready &&
+                                live_rebased_prior_ready;
 
-                            frame->pose = recovery_body_pose;
+                            if (!coherent_commit_preconditions_met) {
+                                const char *skip_reason =
+                                    !target_is_latest
+                                        ? "target_not_latest"
+                                    : !live_state_unchanged
+                                        ? "precommit_state_changed"
+                                    : !coherent_dry_run_ready
+                                        ? "coherent_dry_run_failed"
+                                    : !live_rebased_prior_ready
+                                        ? "live_marginalization_rebase_failed"
+                                    : "unknown";
 
-                            const double applied_delta_t =
-                                (frame->pose.p -
-                                 authoritative_body_pose.p)
-                                    .norm();
-                            const double applied_delta_r =
-                                camera_rotation_delta_deg(
-                                    authoritative_body_pose,
-                                    frame->pose);
-                            const double candidate_pose_delta_t =
-                                (frame->pose.p -
-                                 recovery_body_pose.p)
-                                    .norm();
-                            const double candidate_q_coeff_delta =
-                                (frame->pose.q.coeffs() -
-                                 recovery_body_pose.q.coeffs())
-                                    .norm();
-                            const double committed_v_delta =
-                                (frame->motion.v -
-                                 motion_before_commit.v)
-                                    .norm();
-                            const double committed_bg_delta =
-                                (frame->motion.bg -
-                                 motion_before_commit.bg)
-                                    .norm();
-                            const double committed_ba_delta =
-                                (frame->motion.ba -
-                                 motion_before_commit.ba)
-                                    .norm();
+                                std::fprintf(
+                                    stderr,
+                                    "[PlaceRecoveryCommit] "
+                                    "current=%zu t=%.9f event_id=%zu "
+                                    "commit_scope=active_window_gauge "
+                                    "gravity_policy=yaw_translation "
+                                    "velocity_transform=world_yaw "
+                                    "bias_transform=unchanged "
+                                    "inverse_depth_transform=unchanged "
+                                    "commit_enabled=1 "
+                                    "commit_preconditions_met=0 "
+                                    "reason=%s "
+                                    "target_is_latest=%d "
+                                    "target_has_subframes=%d "
+                                    "coherent_dry_run_ready=%d "
+                                    "live_rebased_prior_ready=%d "
+                                    "estimator_reset=0 loop_constraint=0 "
+                                    "commit_applied=0 state_mutation=0\n",
+                                    frame->id(), frame->image->t,
+                                    group.event_id,
+                                    skip_reason,
+                                    target_is_latest ? 1 : 0,
+                                    target_has_subframes ? 1 : 0,
+                                    coherent_dry_run_ready ? 1 : 0,
+                                    live_rebased_prior_ready ? 1 : 0);
+                            } else {
+                                MarginalizationFactor
+                                    *prepared_live_prior =
+                                        live_rebased_prior.get();
 
-                            const bool pose_matches_candidate =
-                                candidate_pose_delta_t == 0.0 &&
-                                candidate_q_coeff_delta == 0.0;
-                            const bool motion_preserved =
-                                committed_v_delta == 0.0 &&
-                                committed_bg_delta == 0.0 &&
-                                committed_ba_delta == 0.0;
+                                double max_applied_pose_t = 0.0;
+                                double max_applied_pose_r_deg = 0.0;
+                                double max_applied_v_delta = 0.0;
+                                double max_applied_bg_delta = 0.0;
+                                double max_applied_ba_delta = 0.0;
+                                for (const auto &snapshot :
+                                     coherent_states) {
+                                    max_applied_pose_t =
+                                        std::max(
+                                            max_applied_pose_t,
+                                            (snapshot.proposed_pose.p -
+                                             snapshot.before_pose.p)
+                                                .norm());
+                                    max_applied_pose_r_deg =
+                                        std::max(
+                                            max_applied_pose_r_deg,
+                                            coherent_rotation_delta_deg(
+                                                snapshot.before_pose.q,
+                                                snapshot.proposed_pose.q));
+                                    max_applied_v_delta =
+                                        std::max(
+                                            max_applied_v_delta,
+                                            (snapshot
+                                                 .proposed_motion.v -
+                                             snapshot.before_motion.v)
+                                                .norm());
+                                    max_applied_bg_delta =
+                                        std::max(
+                                            max_applied_bg_delta,
+                                            (snapshot
+                                                 .proposed_motion.bg -
+                                             snapshot.before_motion.bg)
+                                                .norm());
+                                    max_applied_ba_delta =
+                                        std::max(
+                                            max_applied_ba_delta,
+                                            (snapshot
+                                                 .proposed_motion.ba -
+                                             snapshot.before_motion.ba)
+                                                .norm());
+                                }
 
-                            std::fprintf(
-                                stderr,
-                                "[PlaceRecoveryCommit] "
-                                "current=%zu t=%.9f event_id=%zu "
-                                "commit_scope=pose_only "
-                                "commit_enabled=1 "
-                                "commit_preconditions_met=1 "
-                                "reason=committed "
-                                "applied_delta_t=%.9f "
-                                "applied_delta_r_deg=%.9f "
-                                "candidate_pose_delta_t=%.9f "
-                                "candidate_q_coeff_delta=%.9f "
-                                "committed_v_delta=%.9f "
-                                "committed_bg_delta=%.9f "
-                                "committed_ba_delta=%.9f "
-                                "pose_matches_candidate=%d "
-                                "motion_preserved=%d "
-                                "estimator_reset=0 loop_constraint=0 "
-                                "archive_refresh_deferred=1 "
-                                "commit_applied=1 state_mutation=1\n",
-                                frame->id(), frame->image->t,
-                                group.event_id,
-                                applied_delta_t,
-                                applied_delta_r,
-                                candidate_pose_delta_t,
-                                candidate_q_coeff_delta,
-                                committed_v_delta,
-                                committed_bg_delta,
-                                committed_ba_delta,
-                                pose_matches_candidate ? 1 : 0,
-                                motion_preserved ? 1 : 0);
+                                // All fallible preparation is complete.
+                                // Apply exactly the state vector validated by
+                                // 0110k, then replace ownership of the
+                                // stale-gauge marginalization prior.
+                                size_t applied_top_level_frames = 0;
+                                size_t applied_subframes = 0;
+                                for (const auto &snapshot :
+                                     coherent_states) {
+                                    snapshot.frame->pose =
+                                        snapshot.proposed_pose;
+                                    snapshot.frame->motion =
+                                        snapshot.proposed_motion;
+                                    if (snapshot.subframe)
+                                        ++applied_subframes;
+                                    else
+                                        ++applied_top_level_frames;
+                                }
+                                map->marginalization_factor =
+                                    std::move(live_rebased_prior);
 
-                            PlaceRecoveryCommitReconciliationState
-                                reconciliation;
-                            reconciliation.event_id = group.event_id;
-                            reconciliation.frame_id = frame->id();
-                            reconciliation.timestamp = frame->image->t;
-                            reconciliation.precommit_body_pose =
-                                authoritative_body_pose;
-                            reconciliation.committed_body_pose = frame->pose;
-                            reconciliation.committed_motion = frame->motion;
-                            reconciliation.recovery_landmarks_world =
-                                representative.inlier_landmarks_world;
-                            reconciliation.recovery_observations_pixel =
-                                representative.inlier_observations_pixel;
-                            active_place_recovery_commit_reconciliations_
-                                .emplace_back(std::move(reconciliation));
+                                const bool prior_replaced =
+                                    map->marginalization_factor &&
+                                    map->marginalization_factor.get() ==
+                                        prepared_live_prior;
+
+                                bool committed_prior_frames_match =
+                                    prior_replaced &&
+                                    map->marginalization_factor
+                                            ->linearization_frames()
+                                            .size() ==
+                                        live_prior_frames.size();
+                                if (committed_prior_frames_match) {
+                                    const auto &committed_prior_frames =
+                                        map->marginalization_factor
+                                            ->linearization_frames();
+                                    for (size_t i = 0;
+                                         i < committed_prior_frames.size();
+                                         ++i) {
+                                        if (committed_prior_frames[i] !=
+                                            live_prior_frames[i]) {
+                                            committed_prior_frames_match =
+                                                false;
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                double max_pose_proposal_error_t = 0.0;
+                                double max_pose_proposal_error_r_deg = 0.0;
+                                double max_motion_proposal_error_v = 0.0;
+                                double max_motion_proposal_error_bg = 0.0;
+                                double max_motion_proposal_error_ba = 0.0;
+                                for (const auto &snapshot :
+                                     coherent_states) {
+                                    max_pose_proposal_error_t =
+                                        std::max(
+                                            max_pose_proposal_error_t,
+                                            (snapshot.frame->pose.p -
+                                             snapshot.proposed_pose.p)
+                                                .norm());
+                                    max_pose_proposal_error_r_deg =
+                                        std::max(
+                                            max_pose_proposal_error_r_deg,
+                                            coherent_rotation_delta_deg(
+                                                snapshot.proposed_pose.q,
+                                                snapshot.frame->pose.q));
+                                    max_motion_proposal_error_v =
+                                        std::max(
+                                            max_motion_proposal_error_v,
+                                            (snapshot.frame->motion.v -
+                                             snapshot
+                                                 .proposed_motion.v)
+                                                .norm());
+                                    max_motion_proposal_error_bg =
+                                        std::max(
+                                            max_motion_proposal_error_bg,
+                                            (snapshot.frame->motion.bg -
+                                             snapshot
+                                                 .proposed_motion.bg)
+                                                .norm());
+                                    max_motion_proposal_error_ba =
+                                        std::max(
+                                            max_motion_proposal_error_ba,
+                                            (snapshot.frame->motion.ba -
+                                             snapshot
+                                                 .proposed_motion.ba)
+                                                .norm());
+                                }
+
+                                bool inverse_depth_unchanged_after_commit =
+                                    true;
+                                double max_inv_depth_delta_after_commit =
+                                    0.0;
+                                for (const auto &[track, before] :
+                                     coherent_inverse_depth_snapshot) {
+                                    const double after =
+                                        track->landmark.inv_depth;
+                                    const bool equal =
+                                        before == after ||
+                                        (std::isnan(before) &&
+                                         std::isnan(after));
+                                    inverse_depth_unchanged_after_commit =
+                                        inverse_depth_unchanged_after_commit &&
+                                        equal;
+                                    if (std::isfinite(before) &&
+                                        std::isfinite(after)) {
+                                        max_inv_depth_delta_after_commit =
+                                            std::max(
+                                                max_inv_depth_delta_after_commit,
+                                                std::abs(after - before));
+                                    }
+                                }
+
+                                // Rebase prior recovery reconciliation
+                                // snapshots into the same new gauge. Their
+                                // fixed-world recovery landmarks intentionally
+                                // remain in the archive/global frame.
+                                size_t reconciliation_states_rebased = 0;
+                                for (auto &existing :
+                                     active_place_recovery_commit_reconciliations_) {
+                                    existing.precommit_body_pose.q =
+                                        coherent_yaw_q *
+                                        existing.precommit_body_pose.q;
+                                    existing.precommit_body_pose.q.normalize();
+                                    existing.precommit_body_pose.p =
+                                        coherent_yaw_q *
+                                            existing.precommit_body_pose.p +
+                                        coherent_translation;
+
+                                    existing.committed_body_pose.q =
+                                        coherent_yaw_q *
+                                        existing.committed_body_pose.q;
+                                    existing.committed_body_pose.q.normalize();
+                                    existing.committed_body_pose.p =
+                                        coherent_yaw_q *
+                                            existing.committed_body_pose.p +
+                                        coherent_translation;
+                                    existing.committed_motion.v =
+                                        coherent_yaw_q *
+                                        existing.committed_motion.v;
+                                    ++reconciliation_states_rebased;
+                                }
+
+                                const double target_applied_delta_t =
+                                    (frame->pose.p -
+                                     authoritative_body_pose.p)
+                                        .norm();
+                                const double target_applied_delta_r =
+                                    coherent_rotation_delta_deg(
+                                        authoritative_body_pose.q,
+                                        frame->pose.q);
+                                const double target_to_full_recovery_t =
+                                    (frame->pose.p -
+                                     recovery_body_pose.p)
+                                        .norm();
+                                const double target_to_full_recovery_r =
+                                    coherent_rotation_delta_deg(
+                                        recovery_body_pose.q,
+                                        frame->pose.q);
+                                const double target_v_transform_error =
+                                    (frame->motion.v -
+                                     coherent_yaw_q *
+                                         authoritative_motion.v)
+                                        .norm();
+                                const double target_bg_delta =
+                                    (frame->motion.bg -
+                                     authoritative_motion.bg)
+                                        .norm();
+                                const double target_ba_delta =
+                                    (frame->motion.ba -
+                                     authoritative_motion.ba)
+                                        .norm();
+
+                                const bool committed_state_matches_proposal =
+                                    max_pose_proposal_error_t == 0.0 &&
+                                    max_pose_proposal_error_r_deg <=
+                                        1.0e-12 &&
+                                    max_motion_proposal_error_v == 0.0 &&
+                                    max_motion_proposal_error_bg == 0.0 &&
+                                    max_motion_proposal_error_ba == 0.0;
+                                const bool coherent_commit_postconditions =
+                                    prior_replaced &&
+                                    committed_prior_frames_match &&
+                                    committed_state_matches_proposal &&
+                                    inverse_depth_unchanged_after_commit &&
+                                    target_to_full_recovery_t <= 1.0e-12 &&
+                                    target_v_transform_error <= 1.0e-12 &&
+                                    target_bg_delta == 0.0 &&
+                                    target_ba_delta == 0.0;
+
+                                std::fprintf(
+                                    stderr,
+                                    "[PlaceRecoveryCommit] "
+                                    "current=%zu t=%.9f event_id=%zu "
+                                    "commit_scope=active_window_gauge "
+                                    "gravity_policy=yaw_translation "
+                                    "velocity_transform=world_yaw "
+                                    "bias_transform=unchanged "
+                                    "inverse_depth_transform=unchanged "
+                                    "commit_enabled=1 "
+                                    "commit_preconditions_met=1 "
+                                    "reason=committed "
+                                    "coherent_dry_run_ready=1 "
+                                    "top_level_frames=%zu "
+                                    "subframes=%zu active_states=%zu "
+                                    "prior_frames=%zu "
+                                    "yaw_correction_deg=%.9f "
+                                    "translation=%.9f,%.9f,%.9f "
+                                    "target_applied_delta_t=%.9f "
+                                    "target_applied_delta_r_deg=%.9f "
+                                    "target_to_full_recovery_t=%.12g "
+                                    "target_to_full_recovery_r_deg=%.9f "
+                                    "target_v_transform_error=%.12g "
+                                    "target_bg_delta=%.12g "
+                                    "target_ba_delta=%.12g "
+                                    "max_applied_pose_t=%.9f "
+                                    "max_applied_pose_r_deg=%.9f "
+                                    "max_applied_v_delta=%.9f "
+                                    "max_applied_bg_delta=%.12g "
+                                    "max_applied_ba_delta=%.12g "
+                                    "applied_top_level_frames=%zu "
+                                    "applied_subframes=%zu "
+                                    "prior_replaced=%d "
+                                    "committed_prior_frames_match=%d "
+                                    "max_pose_proposal_error_t=%.12g "
+                                    "max_pose_proposal_error_r_deg=%.12g "
+                                    "max_motion_proposal_error_v=%.12g "
+                                    "max_motion_proposal_error_bg=%.12g "
+                                    "max_motion_proposal_error_ba=%.12g "
+                                    "inverse_depth_states=%zu "
+                                    "inverse_depth_unchanged=%d "
+                                    "max_inv_depth_delta=%.12g "
+                                    "reconciliation_states_rebased=%zu "
+                                    "commit_postconditions=%d "
+                                    "full_recovery_orientation_applied=0 "
+                                    "estimator_reset=0 loop_constraint=0 "
+                                    "archive_refresh_deferred=1 "
+                                    "commit_applied=1 state_mutation=1\n",
+                                    frame->id(), frame->image->t,
+                                    group.event_id,
+                                    coherent_top_level_count,
+                                    coherent_subframe_count,
+                                    coherent_states.size(),
+                                    live_prior_frames.size(),
+                                    std::abs(coherent_yaw_rad) *
+                                        180.0 / M_PI,
+                                    coherent_translation.x(),
+                                    coherent_translation.y(),
+                                    coherent_translation.z(),
+                                    target_applied_delta_t,
+                                    target_applied_delta_r,
+                                    target_to_full_recovery_t,
+                                    target_to_full_recovery_r,
+                                    target_v_transform_error,
+                                    target_bg_delta,
+                                    target_ba_delta,
+                                    max_applied_pose_t,
+                                    max_applied_pose_r_deg,
+                                    max_applied_v_delta,
+                                    max_applied_bg_delta,
+                                    max_applied_ba_delta,
+                                    applied_top_level_frames,
+                                    applied_subframes,
+                                    prior_replaced ? 1 : 0,
+                                    committed_prior_frames_match ? 1 : 0,
+                                    max_pose_proposal_error_t,
+                                    max_pose_proposal_error_r_deg,
+                                    max_motion_proposal_error_v,
+                                    max_motion_proposal_error_bg,
+                                    max_motion_proposal_error_ba,
+                                    coherent_inverse_depth_snapshot.size(),
+                                    inverse_depth_unchanged_after_commit
+                                        ? 1
+                                        : 0,
+                                    max_inv_depth_delta_after_commit,
+                                    reconciliation_states_rebased,
+                                    coherent_commit_postconditions ? 1 : 0);
+
+                                PlaceRecoveryCommitReconciliationState
+                                    reconciliation;
+                                reconciliation.event_id = group.event_id;
+                                reconciliation.frame_id = frame->id();
+                                reconciliation.timestamp = frame->image->t;
+                                reconciliation.precommit_body_pose =
+                                    authoritative_body_pose;
+                                reconciliation.committed_body_pose =
+                                    frame->pose;
+                                reconciliation.committed_motion =
+                                    frame->motion;
+                                reconciliation.recovery_landmarks_world =
+                                    representative
+                                        .inlier_landmarks_world;
+                                reconciliation.recovery_observations_pixel =
+                                    representative
+                                        .inlier_observations_pixel;
+                                active_place_recovery_commit_reconciliations_
+                                    .emplace_back(
+                                        std::move(reconciliation));
+                            }
                         }
                     }
                 }
