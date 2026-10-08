@@ -81,6 +81,14 @@ class SlidingWindowTracker {
         bool factor_shadow_emitted = false;
     };
 
+    struct PlaceRecoveryCommitCadenceState {
+        size_t event_id = 0;
+        size_t current_frame_id = 0;
+        double timestamp = 0.0;
+        PlaceKey representative_key = 0;
+        size_t reference_frame_id = 0;
+    };
+
     void archive_optimized_keyframes();
     void diagnose_orb_association(Frame *frame);
     void diagnose_retrieved_place_candidates(
@@ -106,6 +114,20 @@ class SlidingWindowTracker {
     size_t next_place_neighborhood_event_id_ = 1;
     std::vector<PlaceRecoveryCommitReconciliationState>
         active_place_recovery_commit_reconciliations_;
+
+    // Diagnostic-only history for measuring whether live recoveries form
+    // isolated corrections or rapid/repeated correction sequences. These
+    // values never participate in retrieval, acceptance, or commit gating.
+    bool place_recovery_commit_cadence_available_ = false;
+    PlaceRecoveryCommitCadenceState
+        last_place_recovery_commit_cadence_;
+    size_t successful_place_recovery_commit_count_ = 0;
+    double place_recovery_cumulative_world_yaw_rad_ = 0.0;
+    vector<3> place_recovery_cumulative_world_translation_ =
+        vector<3>::Zero();
+    double place_recovery_cumulative_target_translation_m_ = 0.0;
+    double place_recovery_cumulative_abs_yaw_rad_ = 0.0;
+
     size_t local_descriptor_keyframe_count_ = 0;
     std::unordered_set<size_t> orb_association_processed_;
     std::shared_ptr<Config> config;

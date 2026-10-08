@@ -3827,6 +3827,179 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
                                     reconciliation_states_rebased,
                                     coherent_commit_postconditions ? 1 : 0);
 
+                                // 0110m diagnostic-only cadence/churn
+                                // measurement. Do not use any of these values
+                                // to alter recovery acceptance or commit
+                                // behavior.
+                                const bool cadence_previous_available =
+                                    place_recovery_commit_cadence_available_;
+                                const double cadence_dt_s =
+                                    cadence_previous_available
+                                        ? frame->image->t -
+                                              last_place_recovery_commit_cadence_
+                                                  .timestamp
+                                        : std::numeric_limits<double>::
+                                              quiet_NaN();
+                                const size_t cadence_frame_gap =
+                                    cadence_previous_available
+                                        ? (frame->id() >=
+                                                   last_place_recovery_commit_cadence_
+                                                       .current_frame_id
+                                               ? frame->id() -
+                                                     last_place_recovery_commit_cadence_
+                                                         .current_frame_id
+                                               : last_place_recovery_commit_cadence_
+                                                         .current_frame_id -
+                                                     frame->id())
+                                        : 0;
+                                const size_t cadence_reference_frame_gap =
+                                    cadence_previous_available
+                                        ? (representative.reference_frame_id >=
+                                                   last_place_recovery_commit_cadence_
+                                                       .reference_frame_id
+                                               ? representative
+                                                         .reference_frame_id -
+                                                     last_place_recovery_commit_cadence_
+                                                         .reference_frame_id
+                                               : last_place_recovery_commit_cadence_
+                                                         .reference_frame_id -
+                                                     representative
+                                                         .reference_frame_id)
+                                        : 0;
+                                const bool cadence_same_event =
+                                    cadence_previous_available &&
+                                    group.event_id ==
+                                        last_place_recovery_commit_cadence_
+                                            .event_id;
+                                const bool cadence_same_representative_key =
+                                    cadence_previous_available &&
+                                    representative.key ==
+                                        last_place_recovery_commit_cadence_
+                                            .representative_key;
+                                const bool cadence_same_reference_frame =
+                                    cadence_previous_available &&
+                                    representative.reference_frame_id ==
+                                        last_place_recovery_commit_cadence_
+                                            .reference_frame_id;
+                                const bool cadence_within_1s =
+                                    cadence_previous_available &&
+                                    std::isfinite(cadence_dt_s) &&
+                                    cadence_dt_s >= 0.0 &&
+                                    cadence_dt_s <= 1.0;
+                                const bool cadence_within_5s =
+                                    cadence_previous_available &&
+                                    std::isfinite(cadence_dt_s) &&
+                                    cadence_dt_s >= 0.0 &&
+                                    cadence_dt_s <= 5.0;
+                                const size_t
+                                    active_prior_reconciliations =
+                                        active_place_recovery_commit_reconciliations_
+                                            .size();
+
+                                place_recovery_cumulative_world_translation_ =
+                                    coherent_yaw_q *
+                                        place_recovery_cumulative_world_translation_ +
+                                    coherent_translation;
+                                place_recovery_cumulative_world_yaw_rad_ +=
+                                    coherent_yaw_rad;
+                                place_recovery_cumulative_target_translation_m_ +=
+                                    target_applied_delta_t;
+                                place_recovery_cumulative_abs_yaw_rad_ +=
+                                    std::abs(coherent_yaw_rad);
+                                ++successful_place_recovery_commit_count_;
+
+                                std::fprintf(
+                                    stderr,
+                                    "[PlaceRecoveryCommitCadenceShadow] "
+                                    "commit_index=%zu "
+                                    "current=%zu t=%.9f event_id=%zu "
+                                    "representative_key=%llu "
+                                    "reference_frame=%zu "
+                                    "previous_available=%d "
+                                    "previous_event_id=%zu "
+                                    "previous_current=%zu "
+                                    "previous_t=%.9f "
+                                    "dt_since_previous_s=%.9f "
+                                    "frame_gap=%zu "
+                                    "reference_frame_gap=%zu "
+                                    "same_event=%d "
+                                    "same_representative_key=%d "
+                                    "same_reference_frame=%d "
+                                    "within_1s=%d within_5s=%d "
+                                    "active_prior_reconciliations=%zu "
+                                    "current_target_delta_t=%.9f "
+                                    "current_yaw_deg=%.9f "
+                                    "cumulative_target_translation_m=%.9f "
+                                    "cumulative_abs_yaw_deg=%.9f "
+                                    "net_world_yaw_deg=%.9f "
+                                    "net_world_translation=%.9f,%.9f,%.9f "
+                                    "net_world_translation_norm=%.9f "
+                                    "commit_postconditions=%d "
+                                    "acceptance_gate_changed=0 "
+                                    "commit_gate_changed=0 "
+                                    "diagnostic_only=1\n",
+                                    successful_place_recovery_commit_count_,
+                                    frame->id(),
+                                    frame->image->t,
+                                    group.event_id,
+                                    static_cast<unsigned long long>(
+                                        representative.key),
+                                    representative.reference_frame_id,
+                                    cadence_previous_available ? 1 : 0,
+                                    cadence_previous_available
+                                        ? last_place_recovery_commit_cadence_
+                                              .event_id
+                                        : 0,
+                                    cadence_previous_available
+                                        ? last_place_recovery_commit_cadence_
+                                              .current_frame_id
+                                        : 0,
+                                    cadence_previous_available
+                                        ? last_place_recovery_commit_cadence_
+                                              .timestamp
+                                        : std::numeric_limits<double>::
+                                              quiet_NaN(),
+                                    cadence_dt_s,
+                                    cadence_frame_gap,
+                                    cadence_reference_frame_gap,
+                                    cadence_same_event ? 1 : 0,
+                                    cadence_same_representative_key ? 1 : 0,
+                                    cadence_same_reference_frame ? 1 : 0,
+                                    cadence_within_1s ? 1 : 0,
+                                    cadence_within_5s ? 1 : 0,
+                                    active_prior_reconciliations,
+                                    target_applied_delta_t,
+                                    std::abs(coherent_yaw_rad) *
+                                        180.0 / M_PI,
+                                    place_recovery_cumulative_target_translation_m_,
+                                    place_recovery_cumulative_abs_yaw_rad_ *
+                                        180.0 / M_PI,
+                                    place_recovery_cumulative_world_yaw_rad_ *
+                                        180.0 / M_PI,
+                                    place_recovery_cumulative_world_translation_
+                                        .x(),
+                                    place_recovery_cumulative_world_translation_
+                                        .y(),
+                                    place_recovery_cumulative_world_translation_
+                                        .z(),
+                                    place_recovery_cumulative_world_translation_
+                                        .norm(),
+                                    coherent_commit_postconditions ? 1 : 0);
+
+                                last_place_recovery_commit_cadence_.event_id =
+                                    group.event_id;
+                                last_place_recovery_commit_cadence_
+                                    .current_frame_id = frame->id();
+                                last_place_recovery_commit_cadence_.timestamp =
+                                    frame->image->t;
+                                last_place_recovery_commit_cadence_
+                                    .representative_key = representative.key;
+                                last_place_recovery_commit_cadence_
+                                    .reference_frame_id =
+                                        representative.reference_frame_id;
+                                place_recovery_commit_cadence_available_ =
+                                    true;
+
                                 PlaceRecoveryCommitReconciliationState
                                     reconciliation;
                                 reconciliation.event_id = group.event_id;
