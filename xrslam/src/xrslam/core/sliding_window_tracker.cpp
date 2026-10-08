@@ -3147,7 +3147,7 @@ diagnose_place_recovery_commit_reconciliation() {
                     "reject=%s "
                     "topology=localize_single_frame "
                     "marginalization_prior=0 "
-                    "state_mutation=0\\n",
+                    "state_mutation=0\n",
                     state.event_id,
                     state.frame_id,
                     state.timestamp,
@@ -3212,6 +3212,9 @@ diagnose_place_recovery_commit_reconciliation() {
                 const auto run_factor_shadow =
                     [this, target, target_top_index, &state,
                      &recovery_rmse_px](
+                        bool use_recovery_seed,
+                        bool include_visual,
+                        bool include_imu,
                         bool include_recovery) {
                         FactorShadowResult result;
                         result.pose = target->pose;
@@ -3224,14 +3227,20 @@ diagnose_place_recovery_commit_reconciliation() {
                         Frame *shadow_target = target_owner.get();
                         shadow_target->tag(FT_FIX_POSE) = false;
                         shadow_target->tag(FT_FIX_MOTION) = false;
+                        if (use_recovery_seed) {
+                            shadow_target->pose =
+                                state.committed_body_pose;
+                        }
                         shadow_map->attach_frame(
                             std::move(target_owner));
 
                         auto solver = Solver::create();
-                        solver->add_frame_states(shadow_target);
+                        solver->add_frame_states(
+                            shadow_target, include_imu);
 
                         PreIntegrator shadow_preintegration;
-                        if (config->has_imu() &&
+                        if (include_imu &&
+                            config->has_imu() &&
                             target_top_index > 0) {
                             Frame *previous =
                                 map->get_frame(
@@ -3254,90 +3263,93 @@ diagnose_place_recovery_commit_reconciliation() {
                             }
                         }
 
-                        std::vector<Frame *> anchor_sources;
-                        std::vector<Frame *> anchor_copies;
+                        if (include_visual) {
+                            std::vector<Frame *> anchor_sources;
+                            std::vector<Frame *> anchor_copies;
 
-                        const auto get_anchor_copy =
-                            [&shadow_map,
-                             &anchor_sources,
-                             &anchor_copies](
-                                Frame *source) {
-                                for (size_t i = 0;
-                                     i < anchor_sources.size();
-                                     ++i) {
-                                    if (anchor_sources[i] ==
-                                        source) {
-                                        return anchor_copies[i];
+                            const auto get_anchor_copy =
+                                [&shadow_map,
+                                 &anchor_sources,
+                                 &anchor_copies](
+                                    Frame *source) {
+                                    for (size_t i = 0;
+                                         i < anchor_sources.size();
+                                         ++i) {
+                                        if (anchor_sources[i] ==
+                                            source) {
+                                            return anchor_copies[i];
+                                        }
                                     }
+
+                                    std::unique_ptr<Frame> owner =
+                                        source->clone();
+                                    Frame *copy = owner.get();
+                                    shadow_map->attach_frame(
+                                        std::move(owner));
+                                    anchor_sources.emplace_back(
+                                        source);
+                                    anchor_copies.emplace_back(copy);
+                                    return copy;
+                                };
+
+                            for (size_t k = 0;
+                                 k < target->keypoint_num();
+                                 ++k) {
+                                Track *source_track =
+                                    target->get_track(k);
+                                if (!source_track ||
+                                    !source_track->all_tagged(
+                                        TT_VALID,
+                                        TT_TRIANGULATED,
+                                        TT_STATIC)) {
+                                    continue;
                                 }
 
-                                std::unique_ptr<Frame> owner =
-                                    source->clone();
-                                Frame *copy = owner.get();
-                                shadow_map->attach_frame(
-                                    std::move(owner));
-                                anchor_sources.emplace_back(
-                                    source);
-                                anchor_copies.emplace_back(copy);
-                                return copy;
-                            };
+                                Frame *source_anchor =
+                                    source_track->first_frame();
+                                if (!source_anchor ||
+                                    source_anchor == target) {
+                                    ++result.self_anchor_skipped;
+                                    continue;
+                                }
 
-                        for (size_t k = 0;
-                             k < target->keypoint_num();
-                             ++k) {
-                            Track *source_track =
-                                target->get_track(k);
-                            if (!source_track ||
-                                !source_track->all_tagged(
-                                    TT_VALID,
-                                    TT_TRIANGULATED,
-                                    TT_STATIC)) {
-                                continue;
+                                const size_t anchor_index =
+                                    source_track
+                                        ->get_keypoint_index(
+                                            source_anchor);
+                                if (anchor_index == nil() ||
+                                    anchor_index >=
+                                        source_anchor
+                                            ->keypoint_num()) {
+                                    continue;
+                                }
+
+                                Frame *shadow_anchor =
+                                    get_anchor_copy(source_anchor);
+                                Track *shadow_track =
+                                    shadow_map->create_track();
+                                shadow_track->add_keypoint(
+                                    shadow_anchor,
+                                    anchor_index);
+                                shadow_track->add_keypoint(
+                                    shadow_target, k);
+                                shadow_track->landmark =
+                                    source_track->landmark;
+                                shadow_track->tag(TT_VALID) = true;
+                                shadow_track->tag(
+                                    TT_TRIANGULATED) = true;
+                                shadow_track->tag(TT_STATIC) = true;
+                                shadow_track->tag(
+                                    TT_FIX_INVD) = true;
+
+                                solver->put_factor(
+                                    Solver::
+                                        create_reprojection_prior_factor(
+                                            shadow_target,
+                                            shadow_track));
+                                ++result
+                                      .conventional_visual_factors;
                             }
-
-                            Frame *source_anchor =
-                                source_track->first_frame();
-                            if (!source_anchor ||
-                                source_anchor == target) {
-                                ++result.self_anchor_skipped;
-                                continue;
-                            }
-
-                            const size_t anchor_index =
-                                source_track
-                                    ->get_keypoint_index(
-                                        source_anchor);
-                            if (anchor_index == nil() ||
-                                anchor_index >=
-                                    source_anchor
-                                        ->keypoint_num()) {
-                                continue;
-                            }
-
-                            Frame *shadow_anchor =
-                                get_anchor_copy(source_anchor);
-                            Track *shadow_track =
-                                shadow_map->create_track();
-                            shadow_track->add_keypoint(
-                                shadow_anchor,
-                                anchor_index);
-                            shadow_track->add_keypoint(
-                                shadow_target, k);
-                            shadow_track->landmark =
-                                source_track->landmark;
-                            shadow_track->tag(TT_VALID) = true;
-                            shadow_track->tag(
-                                TT_TRIANGULATED) = true;
-                            shadow_track->tag(TT_STATIC) = true;
-                            shadow_track->tag(
-                                TT_FIX_INVD) = true;
-
-                            solver->put_factor(
-                                Solver::
-                                    create_reprojection_prior_factor(
-                                        shadow_target,
-                                        shadow_track));
-                            ++result.conventional_visual_factors;
                         }
 
                         if (include_recovery) {
@@ -3368,9 +3380,32 @@ diagnose_place_recovery_commit_reconciliation() {
                 const double current_recovery_rmse_px =
                     recovery_rmse_px(target->pose);
                 const FactorShadowResult baseline =
-                    run_factor_shadow(false);
+                    run_factor_shadow(
+                        false, true, true, false);
                 const FactorShadowResult augmented =
-                    run_factor_shadow(true);
+                    run_factor_shadow(
+                        false, true, true, true);
+
+                // Recovery-seeded ablation. All four cases begin from the
+                // exact accepted recovery pose. They differ only in which
+                // ordinary local constraints are reintroduced, while the
+                // recovery fixed-world factors remain identical:
+                //   A: recovery only
+                //   B: recovery + conventional visual
+                //   C: recovery + incoming IMU
+                //   D: recovery + conventional visual + incoming IMU
+                const FactorShadowResult seeded_recovery_only =
+                    run_factor_shadow(
+                        true, false, false, true);
+                const FactorShadowResult seeded_recovery_visual =
+                    run_factor_shadow(
+                        true, true, false, true);
+                const FactorShadowResult seeded_recovery_imu =
+                    run_factor_shadow(
+                        true, false, true, true);
+                const FactorShadowResult seeded_recovery_visual_imu =
+                    run_factor_shadow(
+                        true, true, true, true);
 
                 const double baseline_delta_current_t =
                     (baseline.pose.p - target->pose.p).norm();
@@ -3418,6 +3453,193 @@ diagnose_place_recovery_commit_reconciliation() {
                 const double augmented_ba_delta =
                     (augmented.motion.ba - target->motion.ba).norm();
 
+                const auto seeded_to_committed_t =
+                    [&state](const FactorShadowResult &result) {
+                        return (result.pose.p -
+                                state.committed_body_pose.p)
+                            .norm();
+                    };
+                const auto seeded_to_committed_r =
+                    [&state](const FactorShadowResult &result) {
+                        return camera_rotation_delta_deg(
+                            state.committed_body_pose,
+                            result.pose);
+                    };
+                const auto seeded_to_precommit_t =
+                    [&state](const FactorShadowResult &result) {
+                        return (result.pose.p -
+                                state.precommit_body_pose.p)
+                            .norm();
+                    };
+                const auto seeded_to_precommit_r =
+                    [&state](const FactorShadowResult &result) {
+                        return camera_rotation_delta_deg(
+                            state.precommit_body_pose,
+                            result.pose);
+                    };
+
+                const double visual_effect_from_recovery_only_t =
+                    (seeded_recovery_visual.pose.p -
+                     seeded_recovery_only.pose.p)
+                        .norm();
+                const double visual_effect_from_recovery_only_r =
+                    camera_rotation_delta_deg(
+                        seeded_recovery_only.pose,
+                        seeded_recovery_visual.pose);
+                const double imu_effect_from_recovery_only_t =
+                    (seeded_recovery_imu.pose.p -
+                     seeded_recovery_only.pose.p)
+                        .norm();
+                const double imu_effect_from_recovery_only_r =
+                    camera_rotation_delta_deg(
+                        seeded_recovery_only.pose,
+                        seeded_recovery_imu.pose);
+                const double combined_effect_from_recovery_only_t =
+                    (seeded_recovery_visual_imu.pose.p -
+                     seeded_recovery_only.pose.p)
+                        .norm();
+                const double combined_effect_from_recovery_only_r =
+                    camera_rotation_delta_deg(
+                        seeded_recovery_only.pose,
+                        seeded_recovery_visual_imu.pose);
+
+                const double seeded_recovery_imu_v_delta =
+                    (seeded_recovery_imu.motion.v -
+                     target->motion.v)
+                        .norm();
+                const double seeded_recovery_imu_bg_delta =
+                    (seeded_recovery_imu.motion.bg -
+                     target->motion.bg)
+                        .norm();
+                const double seeded_recovery_imu_ba_delta =
+                    (seeded_recovery_imu.motion.ba -
+                     target->motion.ba)
+                        .norm();
+                const double seeded_recovery_visual_imu_v_delta =
+                    (seeded_recovery_visual_imu.motion.v -
+                     target->motion.v)
+                        .norm();
+                const double seeded_recovery_visual_imu_bg_delta =
+                    (seeded_recovery_visual_imu.motion.bg -
+                     target->motion.bg)
+                        .norm();
+                const double seeded_recovery_visual_imu_ba_delta =
+                    (seeded_recovery_visual_imu.motion.ba -
+                     target->motion.ba)
+                        .norm();
+
+                std::fprintf(
+                    stderr,
+                    "[PlaceRecoverySeededAblationShadow] "
+                    "event_id=%zu commit_frame=%zu "
+                    "commit_t=%.9f "
+                    "latest_refined_frame=%zu "
+                    "seed=recovery_committed_pose "
+                    "motion_seed=current_authoritative "
+                    "marginalization_prior=0 "
+                    "recovery_factors=%zu "
+                    "conventional_visual_factors=%zu "
+                    "recovery_only_usable=%d "
+                    "recovery_only_rmse_px=%.9f "
+                    "recovery_only_to_committed_t=%.9f "
+                    "recovery_only_to_committed_r_deg=%.9f "
+                    "recovery_only_to_precommit_t=%.9f "
+                    "recovery_only_to_precommit_r_deg=%.9f "
+                    "recovery_visual_usable=%d "
+                    "recovery_visual_rmse_px=%.9f "
+                    "recovery_visual_to_committed_t=%.9f "
+                    "recovery_visual_to_committed_r_deg=%.9f "
+                    "recovery_visual_to_precommit_t=%.9f "
+                    "recovery_visual_to_precommit_r_deg=%.9f "
+                    "recovery_imu_usable=%d "
+                    "recovery_imu_prior=%d "
+                    "recovery_imu_rmse_px=%.9f "
+                    "recovery_imu_to_committed_t=%.9f "
+                    "recovery_imu_to_committed_r_deg=%.9f "
+                    "recovery_imu_to_precommit_t=%.9f "
+                    "recovery_imu_to_precommit_r_deg=%.9f "
+                    "recovery_visual_imu_usable=%d "
+                    "recovery_visual_imu_prior=%d "
+                    "recovery_visual_imu_rmse_px=%.9f "
+                    "recovery_visual_imu_to_committed_t=%.9f "
+                    "recovery_visual_imu_to_committed_r_deg=%.9f "
+                    "recovery_visual_imu_to_precommit_t=%.9f "
+                    "recovery_visual_imu_to_precommit_r_deg=%.9f "
+                    "visual_effect_from_recovery_only_t=%.9f "
+                    "visual_effect_from_recovery_only_r_deg=%.9f "
+                    "imu_effect_from_recovery_only_t=%.9f "
+                    "imu_effect_from_recovery_only_r_deg=%.9f "
+                    "combined_effect_from_recovery_only_t=%.9f "
+                    "combined_effect_from_recovery_only_r_deg=%.9f "
+                    "recovery_imu_v_delta=%.9f "
+                    "recovery_imu_bg_delta=%.9f "
+                    "recovery_imu_ba_delta=%.9f "
+                    "recovery_visual_imu_v_delta=%.9f "
+                    "recovery_visual_imu_bg_delta=%.9f "
+                    "recovery_visual_imu_ba_delta=%.9f "
+                    "state_mutation=0\n",
+                    state.event_id,
+                    state.frame_id,
+                    state.timestamp,
+                    latest_refined_frame_id,
+                    seeded_recovery_only.recovery_factors,
+                    seeded_recovery_visual
+                        .conventional_visual_factors,
+                    seeded_recovery_only.usable ? 1 : 0,
+                    seeded_recovery_only.recovery_rmse_px,
+                    seeded_to_committed_t(
+                        seeded_recovery_only),
+                    seeded_to_committed_r(
+                        seeded_recovery_only),
+                    seeded_to_precommit_t(
+                        seeded_recovery_only),
+                    seeded_to_precommit_r(
+                        seeded_recovery_only),
+                    seeded_recovery_visual.usable ? 1 : 0,
+                    seeded_recovery_visual.recovery_rmse_px,
+                    seeded_to_committed_t(
+                        seeded_recovery_visual),
+                    seeded_to_committed_r(
+                        seeded_recovery_visual),
+                    seeded_to_precommit_t(
+                        seeded_recovery_visual),
+                    seeded_to_precommit_r(
+                        seeded_recovery_visual),
+                    seeded_recovery_imu.usable ? 1 : 0,
+                    seeded_recovery_imu.imu_prior ? 1 : 0,
+                    seeded_recovery_imu.recovery_rmse_px,
+                    seeded_to_committed_t(
+                        seeded_recovery_imu),
+                    seeded_to_committed_r(
+                        seeded_recovery_imu),
+                    seeded_to_precommit_t(
+                        seeded_recovery_imu),
+                    seeded_to_precommit_r(
+                        seeded_recovery_imu),
+                    seeded_recovery_visual_imu.usable ? 1 : 0,
+                    seeded_recovery_visual_imu.imu_prior ? 1 : 0,
+                    seeded_recovery_visual_imu.recovery_rmse_px,
+                    seeded_to_committed_t(
+                        seeded_recovery_visual_imu),
+                    seeded_to_committed_r(
+                        seeded_recovery_visual_imu),
+                    seeded_to_precommit_t(
+                        seeded_recovery_visual_imu),
+                    seeded_to_precommit_r(
+                        seeded_recovery_visual_imu),
+                    visual_effect_from_recovery_only_t,
+                    visual_effect_from_recovery_only_r,
+                    imu_effect_from_recovery_only_t,
+                    imu_effect_from_recovery_only_r,
+                    combined_effect_from_recovery_only_t,
+                    combined_effect_from_recovery_only_r,
+                    seeded_recovery_imu_v_delta,
+                    seeded_recovery_imu_bg_delta,
+                    seeded_recovery_imu_ba_delta,
+                    seeded_recovery_visual_imu_v_delta,
+                    seeded_recovery_visual_imu_bg_delta,
+                    seeded_recovery_visual_imu_ba_delta);
+
                 std::fprintf(
                     stderr,
                     "[PlaceRecoveryFactorIntegrationShadow] "
@@ -3451,7 +3673,7 @@ diagnose_place_recovery_commit_reconciliation() {
                     "augmented_v_delta=%.9f "
                     "augmented_bg_delta=%.9f "
                     "augmented_ba_delta=%.9f "
-                    "state_mutation=0\\n",
+                    "state_mutation=0\n",
                     state.event_id,
                     state.frame_id,
                     state.timestamp,
