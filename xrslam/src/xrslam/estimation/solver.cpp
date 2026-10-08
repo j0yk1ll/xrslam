@@ -71,6 +71,108 @@ struct CeresLearnedWorldReprojectionCost {
     matrix<3> local_tangent;
 };
 
+class CeresShadowReprojectionFactor final
+    : public ceres::SizedCostFunction<2, 4, 3, 4, 3, 1> {
+  public:
+    CeresShadowReprojectionFactor(
+        Frame *frame, size_t keypoint_index,
+        Frame *reference_frame, size_t reference_keypoint_index)
+        : z_ref(reference_frame->get_keypoint(
+              reference_keypoint_index)),
+          camera_ref(reference_frame->camera),
+          camera_tgt(frame->camera),
+          sqrt_inv_cov(frame->sqrt_inv_cov) {
+        const vector<3> &z =
+            frame->get_keypoint(keypoint_index);
+        local_tangent.leftCols<2>() =
+            s2_tangential_basis(z);
+        local_tangent.rightCols<1>() = z;
+    }
+
+    bool Evaluate(const double *const *parameters,
+                  double *residuals,
+                  double **jacobians) const override {
+        const_map<quaternion> q_tgt_center(parameters[0]);
+        const_map<vector<3>> p_tgt_center(parameters[1]);
+        const_map<quaternion> q_ref_center(parameters[2]);
+        const_map<vector<3>> p_ref_center(parameters[3]);
+        const double &inv_depth(*parameters[4]);
+
+        map<vector<2>> r(residuals);
+
+        vector<3> y_ref = z_ref / inv_depth;
+        vector<3> y_ref_center =
+            camera_ref.q_cs * y_ref + camera_ref.p_cs;
+        vector<3> x =
+            q_ref_center * y_ref_center + p_ref_center;
+        vector<3> y_tgt_center =
+            q_tgt_center.conjugate() * (x - p_tgt_center);
+        vector<3> y_tgt =
+            camera_tgt.q_cs.conjugate() *
+            (y_tgt_center - camera_tgt.p_cs);
+        vector<3> u_tgt =
+            local_tangent.transpose() * y_tgt;
+        r = u_tgt.hnormalized();
+
+        if (jacobians) {
+            matrix<2, 3> dr_dy_tgt =
+                sqrt_inv_cov * dproj_dp(u_tgt) *
+                local_tangent.transpose();
+            matrix<2, 3> dr_dy_tgt_center =
+                dr_dy_tgt *
+                camera_tgt.q_cs.conjugate().matrix();
+            matrix<2, 3> dr_dx =
+                dr_dy_tgt_center *
+                q_tgt_center.conjugate().matrix();
+            matrix<2, 3> dr_dy_ref_center =
+                dr_dx * q_ref_center.matrix();
+
+            if (jacobians[0]) {
+                map<matrix<2, 4, true>> dr_dq_tgt(
+                    jacobians[0]);
+                dr_dq_tgt.block<2, 3>(0, 0) =
+                    dr_dy_tgt_center * hat(y_tgt_center);
+                dr_dq_tgt.col(3).setZero();
+            }
+            if (jacobians[1]) {
+                map<matrix<2, 3, true>> dr_dp_tgt(
+                    jacobians[1]);
+                dr_dp_tgt = -dr_dx;
+            }
+            if (jacobians[2]) {
+                map<matrix<2, 4, true>> dr_dq_ref(
+                    jacobians[2]);
+                dr_dq_ref.block<2, 3>(0, 0) =
+                    -dr_dy_ref_center * hat(y_ref_center);
+                dr_dq_ref.col(3).setZero();
+            }
+            if (jacobians[3]) {
+                map<matrix<2, 3, true>> dr_dp_ref(
+                    jacobians[3]);
+                dr_dp_ref = dr_dx;
+            }
+            if (jacobians[4]) {
+                map<matrix<2, 1, true>> dr_dinv_depth(
+                    jacobians[4]);
+                dr_dinv_depth =
+                    -dr_dy_ref_center *
+                    camera_ref.q_cs.matrix() *
+                    y_ref / inv_depth;
+            }
+        }
+
+        r = sqrt_inv_cov * r;
+        return true;
+    }
+
+  private:
+    vector<3> z_ref;
+    ExtrinsicParams camera_ref;
+    ExtrinsicParams camera_tgt;
+    matrix<2> sqrt_inv_cov;
+    matrix<3> local_tangent;
+};
+
 class CeresDepthPriorFactor final : public ceres::SizedCostFunction<1, 1> {
   public:
     CeresDepthPriorFactor(double inv_depth, double sqrt_info)
@@ -108,6 +210,8 @@ struct Solver::SolverDetails {
     std::vector<std::unique_ptr<PreIntegrationPriorFactor>> managed_pipfactors;
     std::vector<std::unique_ptr<MarginalizationFactor>> managed_marfactors;
     std::vector<std::unique_ptr<ceres::CostFunction>> managed_depth_factors;
+    std::vector<std::unique_ptr<ceres::CostFunction>>
+        managed_shadow_reprojection_factors;
     std::vector<std::unique_ptr<ceres::CostFunction>>
         managed_learned_recovery_factors;
     std::unordered_set<Track *> depth_prior_tracks;
@@ -232,6 +336,93 @@ void Solver::add_track_states(Track *track) {
             &(track->landmark.inv_depth));
         details->managed_depth_factors.emplace_back(std::move(factor));
     }
+}
+
+bool Solver::add_shadow_track_state(
+    double *inv_depth, Track *source_track) {
+    if (!inv_depth || !source_track)
+        return false;
+
+    details->problem->AddParameterBlock(inv_depth, 1);
+    if (source_track->tag(TT_FIX_INVD)) {
+        details->problem->SetParameterBlockConstant(
+            inv_depth);
+        return true;
+    }
+
+    if (source_track->has_depth_prior) {
+        double relative_sigma =
+            details->config()
+                ->depth_sensor_metric_relative_sigma();
+        if (source_track->depth_prior_source ==
+            DepthSource::MONOCULAR_METRIC) {
+            relative_sigma =
+                details->config()
+                    ->depth_monocular_metric_relative_sigma();
+        }
+        relative_sigma =
+            std::max(relative_sigma, 1.0e-6);
+        const double sigma_inv_depth =
+            std::max(
+                relative_sigma *
+                    std::abs(
+                        source_track
+                            ->depth_prior_inv_depth),
+                1.0e-3);
+        const double confidence =
+            std::max(
+                0.0,
+                std::min(
+                    1.0,
+                    source_track
+                        ->depth_prior_confidence));
+        const double sqrt_info =
+            std::sqrt(confidence) /
+            sigma_inv_depth;
+
+        auto factor =
+            std::make_unique<CeresDepthPriorFactor>(
+                source_track->depth_prior_inv_depth,
+                sqrt_info);
+        details->problem->AddResidualBlock(
+            factor.get(), details->cauchy_loss.get(),
+            inv_depth);
+        details->managed_depth_factors.emplace_back(
+            std::move(factor));
+    }
+
+    return true;
+}
+
+bool Solver::add_shadow_reprojection(
+    Frame *frame, size_t keypoint_index,
+    Frame *reference_frame,
+    size_t reference_keypoint_index,
+    double *inv_depth) {
+    if (!frame || !reference_frame || !inv_depth ||
+        frame == reference_frame ||
+        keypoint_index >= frame->keypoint_num() ||
+        reference_keypoint_index >=
+            reference_frame->keypoint_num()) {
+        return false;
+    }
+
+    auto factor =
+        std::make_unique<CeresShadowReprojectionFactor>(
+            frame, keypoint_index,
+            reference_frame,
+            reference_keypoint_index);
+
+    details->problem->AddResidualBlock(
+        factor.get(), details->cauchy_loss.get(),
+        frame->pose.q.coeffs().data(),
+        frame->pose.p.data(),
+        reference_frame->pose.q.coeffs().data(),
+        reference_frame->pose.p.data(),
+        inv_depth);
+    details->managed_shadow_reprojection_factors
+        .emplace_back(std::move(factor));
+    return true;
 }
 
 void Solver::add_learned_world_reprojection(

@@ -4939,6 +4939,789 @@ diagnose_place_recovery_commit_reconciliation() {
                     marginalization_target_to_committed_r(
                         yaw_rebased_marginalization_recovery));
 
+                // 0110j: reproduce the ordinary full-window visual
+                // topology on clone-owned frame states and inverse-depth
+                // scalars. This adds the same valid/static keyframe-anchored
+                // track states, ordinary Cauchy(1.0) reprojection factors,
+                // complete top-level IMU chain, and marginalization prior as
+                // refine_window(), while leaving all live Frame/Track state
+                // untouched.
+                struct FullWindowVisualShadowResult {
+                    bool usable = false;
+                    bool prior_bound = false;
+                    bool prior_rebased = false;
+                    bool complete = false;
+                    size_t window_frames = 0;
+                    size_t prior_frames = 0;
+                    size_t target_index =
+                        static_cast<size_t>(-1);
+                    size_t imu_edges = 0;
+                    size_t visual_track_states = 0;
+                    size_t visual_factors = 0;
+                    size_t visual_fixed_inv_depth = 0;
+                    size_t visual_depth_priors = 0;
+                    size_t visual_mapping_failures = 0;
+                    size_t recovery_factors = 0;
+                    PoseState target_seed_pose;
+                    MotionState target_seed_motion;
+                    PoseState target_pose;
+                    MotionState target_motion;
+                    double recovery_rmse_px =
+                        std::numeric_limits<double>::quiet_NaN();
+                    double max_pose_delta_seed_t = 0.0;
+                    double max_pose_delta_seed_r_deg = 0.0;
+                    double max_v_delta = 0.0;
+                    double max_bg_delta = 0.0;
+                    double max_ba_delta = 0.0;
+                    double max_inv_depth_delta = 0.0;
+                    std::vector<double> final_inverse_depths;
+                };
+
+                const auto run_full_window_visual_shadow =
+                    [this, target_top_index, &state,
+                     &recovery_rmse_px](
+                        const quaternion &correction_q,
+                        const vector<3> &correction_p,
+                        bool rebase_prior,
+                        bool include_recovery) {
+                        FullWindowVisualShadowResult result;
+                        result.window_frames =
+                            map->frame_num();
+                        result.target_index =
+                            target_top_index;
+
+                        if (!config->has_imu() ||
+                            !map->marginalization_factor ||
+                            result.window_frames < 2 ||
+                            target_top_index >=
+                                result.window_frames) {
+                            return result;
+                        }
+
+                        std::vector<std::unique_ptr<Frame>>
+                            shadow_owners;
+                        std::vector<Frame *> shadow_frames;
+                        std::vector<PoseState> seed_poses;
+                        std::vector<MotionState> seed_motions;
+                        std::unordered_map<Frame *, Frame *>
+                            shadow_by_source;
+                        shadow_owners.reserve(
+                            result.window_frames);
+                        shadow_frames.reserve(
+                            result.window_frames);
+                        seed_poses.reserve(
+                            result.window_frames);
+                        seed_motions.reserve(
+                            result.window_frames);
+                        shadow_by_source.reserve(
+                            result.window_frames);
+
+                        for (size_t i = 0;
+                             i < result.window_frames;
+                             ++i) {
+                            Frame *source =
+                                map->get_frame(i);
+                            if (!source || !source->image)
+                                return result;
+
+                            std::unique_ptr<Frame> owner =
+                                source->clone();
+                            Frame *shadow = owner.get();
+
+                            shadow->pose.q =
+                                correction_q *
+                                shadow->pose.q;
+                            shadow->pose.q.normalize();
+                            shadow->pose.p =
+                                correction_q *
+                                    shadow->pose.p +
+                                correction_p;
+                            shadow->motion.v =
+                                correction_q *
+                                shadow->motion.v;
+                            shadow->tag(FT_FIX_POSE) = false;
+                            shadow->tag(FT_FIX_MOTION) = false;
+
+                            seed_poses.emplace_back(
+                                shadow->pose);
+                            seed_motions.emplace_back(
+                                shadow->motion);
+                            shadow_by_source[source] = shadow;
+                            shadow_frames.emplace_back(shadow);
+                            shadow_owners.emplace_back(
+                                std::move(owner));
+                        }
+
+                        Frame *shadow_target =
+                            shadow_frames[
+                                target_top_index];
+                        result.target_seed_pose =
+                            shadow_target->pose;
+                        result.target_seed_motion =
+                            shadow_target->motion;
+                        result.target_pose =
+                            result.target_seed_pose;
+                        result.target_motion =
+                            result.target_seed_motion;
+
+                        auto solver = Solver::create();
+                        for (Frame *shadow :
+                             shadow_frames) {
+                            solver->add_frame_states(
+                                shadow);
+                        }
+
+                        // Match refine_window()'s track-state eligibility
+                        // exactly, but place each inverse depth in independent
+                        // shadow-owned storage rather than allocating Track.
+                        std::unordered_set<Track *>
+                            visited_tracks;
+                        std::vector<Track *>
+                            source_tracks;
+                        for (size_t i = 0;
+                             i < result.window_frames;
+                             ++i) {
+                            Frame *source =
+                                map->get_frame(i);
+                            for (size_t k = 0;
+                                 k < source->keypoint_num();
+                                 ++k) {
+                                Track *track =
+                                    source->get_track(k);
+                                if (!track ||
+                                    visited_tracks.count(
+                                        track) > 0) {
+                                    continue;
+                                }
+                                visited_tracks.insert(track);
+
+                                if (!track->tag(TT_VALID) ||
+                                    !track->tag(TT_STATIC) ||
+                                    !track->first_frame()
+                                         ->tag(FT_KEYFRAME)) {
+                                    continue;
+                                }
+                                source_tracks.emplace_back(
+                                    track);
+                            }
+                        }
+
+                        std::vector<std::unique_ptr<double>>
+                            shadow_inverse_depth_owners;
+                        std::vector<Track *>
+                            shadow_inverse_depth_sources;
+                        std::unordered_map<Track *, double *>
+                            shadow_inverse_depths;
+                        shadow_inverse_depth_owners.reserve(
+                            source_tracks.size());
+                        shadow_inverse_depth_sources.reserve(
+                            source_tracks.size());
+                        shadow_inverse_depths.reserve(
+                            source_tracks.size());
+
+                        for (Track *track :
+                             source_tracks) {
+                            auto inv_depth =
+                                std::make_unique<double>(
+                                    track->landmark
+                                        .inv_depth);
+                            double *value =
+                                inv_depth.get();
+                            if (!solver
+                                     ->add_shadow_track_state(
+                                         value, track)) {
+                                ++result
+                                      .visual_mapping_failures;
+                                continue;
+                            }
+
+                            if (track->tag(TT_FIX_INVD)) {
+                                ++result
+                                      .visual_fixed_inv_depth;
+                            } else if (
+                                track->has_depth_prior) {
+                                ++result
+                                      .visual_depth_priors;
+                            }
+
+                            shadow_inverse_depths[
+                                track] = value;
+                            shadow_inverse_depth_owners
+                                .emplace_back(
+                                    std::move(inv_depth));
+                            shadow_inverse_depth_sources
+                                .emplace_back(track);
+                            ++result
+                                  .visual_track_states;
+                        }
+
+                        // Match refine_window()'s ordinary reprojection-factor
+                        // eligibility and use the same Cauchy(1.0) loss.
+                        for (size_t i = 0;
+                             i < result.window_frames;
+                             ++i) {
+                            Frame *source =
+                                map->get_frame(i);
+                            Frame *shadow =
+                                shadow_frames[i];
+
+                            for (size_t k = 0;
+                                 k < source->keypoint_num();
+                                 ++k) {
+                                Track *track =
+                                    source->get_track(k);
+                                if (!track)
+                                    continue;
+                                if (!track->all_tagged(
+                                        TT_VALID,
+                                        TT_TRIANGULATED,
+                                        TT_STATIC)) {
+                                    continue;
+                                }
+
+                                Frame *source_reference =
+                                    track->first_frame();
+                                if (!source_reference
+                                         ->tag(FT_KEYFRAME)) {
+                                    continue;
+                                }
+                                if (source ==
+                                    source_reference) {
+                                    continue;
+                                }
+
+                                const auto
+                                    inverse_depth_it =
+                                        shadow_inverse_depths
+                                            .find(track);
+                                const auto reference_it =
+                                    shadow_by_source.find(
+                                        source_reference);
+                                const size_t
+                                    reference_keypoint_index =
+                                        track
+                                            ->get_keypoint_index(
+                                                source_reference);
+
+                                if (inverse_depth_it ==
+                                        shadow_inverse_depths
+                                            .end() ||
+                                    reference_it ==
+                                        shadow_by_source.end() ||
+                                    reference_keypoint_index ==
+                                        nil()) {
+                                    ++result
+                                          .visual_mapping_failures;
+                                    continue;
+                                }
+
+                                if (solver
+                                        ->add_shadow_reprojection(
+                                            shadow, k,
+                                            reference_it
+                                                ->second,
+                                            reference_keypoint_index,
+                                            inverse_depth_it
+                                                ->second)) {
+                                    ++result
+                                          .visual_factors;
+                                } else {
+                                    ++result
+                                          .visual_mapping_failures;
+                                }
+                            }
+                        }
+
+                        const auto &prior_sources =
+                            map->marginalization_factor
+                                ->linearization_frames();
+                        result.prior_frames =
+                            prior_sources.size();
+
+                        std::vector<Frame *>
+                            shadow_prior_frames;
+                        shadow_prior_frames.reserve(
+                            prior_sources.size());
+                        for (Frame *prior_source :
+                             prior_sources) {
+                            const auto it =
+                                shadow_by_source.find(
+                                    prior_source);
+                            if (it ==
+                                shadow_by_source.end()) {
+                                ++result
+                                      .visual_mapping_failures;
+                                return result;
+                            }
+                            shadow_prior_frames
+                                .emplace_back(it->second);
+                        }
+
+                        std::unique_ptr<MarginalizationFactor>
+                            rebased_prior;
+                        MarginalizationFactor *prior_factor =
+                            map->marginalization_factor.get();
+                        if (rebase_prior) {
+                            rebased_prior =
+                                map->marginalization_factor
+                                    ->clone_rebased_world(
+                                        shadow_prior_frames,
+                                        correction_q,
+                                        correction_p);
+                            if (!rebased_prior)
+                                return result;
+                            prior_factor =
+                                rebased_prior.get();
+                            result.prior_rebased = true;
+                        }
+
+                        result.prior_bound =
+                            solver
+                                ->add_marginalization_factor_for_frames(
+                                    prior_factor,
+                                    shadow_prior_frames);
+                        if (!result.prior_bound)
+                            return result;
+
+                        // Preintegration factors hold PreIntegrator references;
+                        // reserve final storage before constructing factors.
+                        std::vector<PreIntegrator>
+                            shadow_preintegrations;
+                        shadow_preintegrations.reserve(
+                            result.window_frames - 1);
+                        for (size_t i = 1;
+                             i < result.window_frames;
+                             ++i) {
+                            Frame *source_current =
+                                map->get_frame(i);
+                            Frame *shadow_previous =
+                                shadow_frames[i - 1];
+                            Frame *shadow_current =
+                                shadow_frames[i];
+
+                            shadow_preintegrations
+                                .emplace_back(
+                                    source_current
+                                        ->keyframe_preintegration);
+                            PreIntegrator &preintegration =
+                                shadow_preintegrations.back();
+                            if (!preintegration.integrate(
+                                    shadow_current->image->t,
+                                    shadow_previous
+                                        ->motion.bg,
+                                    shadow_previous
+                                        ->motion.ba,
+                                    true, true)) {
+                                return result;
+                            }
+
+                            solver->put_factor(
+                                Solver::
+                                    create_preintegration_error_factor(
+                                        shadow_previous,
+                                        shadow_current,
+                                        preintegration));
+                            ++result.imu_edges;
+                        }
+
+                        if (include_recovery) {
+                            for (size_t i = 0;
+                                 i < state
+                                         .recovery_landmarks_world
+                                         .size();
+                                 ++i) {
+                                solver
+                                    ->add_learned_world_reprojection(
+                                        shadow_target,
+                                        state
+                                            .recovery_landmarks_world[i],
+                                        state
+                                            .recovery_observations_pixel[i]);
+                                ++result
+                                      .recovery_factors;
+                            }
+                        }
+
+                        result.complete =
+                            result.prior_bound &&
+                            result.imu_edges + 1 ==
+                                result.window_frames &&
+                            result.visual_mapping_failures ==
+                                0;
+                        result.usable = solver->solve();
+
+                        result.target_pose =
+                            shadow_target->pose;
+                        result.target_motion =
+                            shadow_target->motion;
+                        result.recovery_rmse_px =
+                            recovery_rmse_px(
+                                shadow_target->pose);
+
+                        for (size_t i = 0;
+                             i < result.window_frames;
+                             ++i) {
+                            result.max_pose_delta_seed_t =
+                                std::max(
+                                    result
+                                        .max_pose_delta_seed_t,
+                                    (shadow_frames[i]
+                                         ->pose.p -
+                                     seed_poses[i].p)
+                                        .norm());
+                            result.max_pose_delta_seed_r_deg =
+                                std::max(
+                                    result
+                                        .max_pose_delta_seed_r_deg,
+                                    camera_rotation_delta_deg(
+                                        seed_poses[i],
+                                        shadow_frames[i]
+                                            ->pose));
+                            result.max_v_delta =
+                                std::max(
+                                    result.max_v_delta,
+                                    (shadow_frames[i]
+                                         ->motion.v -
+                                     seed_motions[i].v)
+                                        .norm());
+                            result.max_bg_delta =
+                                std::max(
+                                    result.max_bg_delta,
+                                    (shadow_frames[i]
+                                         ->motion.bg -
+                                     seed_motions[i].bg)
+                                        .norm());
+                            result.max_ba_delta =
+                                std::max(
+                                    result.max_ba_delta,
+                                    (shadow_frames[i]
+                                         ->motion.ba -
+                                     seed_motions[i].ba)
+                                        .norm());
+                        }
+
+                        result.final_inverse_depths.reserve(
+                            shadow_inverse_depth_owners
+                                .size());
+                        for (size_t i = 0;
+                             i <
+                             shadow_inverse_depth_owners
+                                 .size();
+                             ++i) {
+                            const double value =
+                                *shadow_inverse_depth_owners[i];
+                            result.final_inverse_depths
+                                .emplace_back(value);
+                            result.max_inv_depth_delta =
+                                std::max(
+                                    result
+                                        .max_inv_depth_delta,
+                                    std::abs(
+                                        value -
+                                        shadow_inverse_depth_sources[i]
+                                            ->landmark
+                                            .inv_depth));
+                        }
+
+                        return result;
+                    };
+
+                const FullWindowVisualShadowResult
+                    identity_full_visual =
+                        run_full_window_visual_shadow(
+                            identity_correction_q,
+                            identity_correction_p,
+                            false,
+                            false);
+                const FullWindowVisualShadowResult
+                    yaw_rebased_full_visual =
+                        run_full_window_visual_shadow(
+                            yaw_correction_q,
+                            yaw_correction_p,
+                            true,
+                            false);
+                const FullWindowVisualShadowResult
+                    yaw_rebased_full_visual_recovery =
+                        run_full_window_visual_shadow(
+                            yaw_correction_q,
+                            yaw_correction_p,
+                            true,
+                            true);
+
+                const auto full_visual_target_delta_seed_t =
+                    [](const FullWindowVisualShadowResult
+                           &result) {
+                        return (result.target_pose.p -
+                                result.target_seed_pose.p)
+                            .norm();
+                    };
+                const auto full_visual_target_delta_seed_r =
+                    [](const FullWindowVisualShadowResult
+                           &result) {
+                        return camera_rotation_delta_deg(
+                            result.target_seed_pose,
+                            result.target_pose);
+                    };
+                const auto full_visual_target_to_committed_t =
+                    [&state](
+                        const FullWindowVisualShadowResult
+                            &result) {
+                        return (result.target_pose.p -
+                                state.committed_body_pose.p)
+                            .norm();
+                    };
+                const auto full_visual_target_to_committed_r =
+                    [&state](
+                        const FullWindowVisualShadowResult
+                            &result) {
+                        return camera_rotation_delta_deg(
+                            state.committed_body_pose,
+                            result.target_pose);
+                    };
+
+                PoseState transformed_identity_full_pose;
+                transformed_identity_full_pose.q =
+                    yaw_correction_q *
+                    identity_full_visual.target_pose.q;
+                transformed_identity_full_pose.q.normalize();
+                transformed_identity_full_pose.p =
+                    yaw_correction_q *
+                        identity_full_visual.target_pose.p +
+                    yaw_correction_p;
+
+                MotionState transformed_identity_full_motion =
+                    identity_full_visual.target_motion;
+                transformed_identity_full_motion.v =
+                    yaw_correction_q *
+                    identity_full_visual
+                        .target_motion.v;
+
+                const double full_equivalence_t =
+                    (yaw_rebased_full_visual
+                         .target_pose.p -
+                     transformed_identity_full_pose.p)
+                        .norm();
+                const double full_equivalence_r =
+                    camera_rotation_delta_deg(
+                        transformed_identity_full_pose,
+                        yaw_rebased_full_visual.target_pose);
+                const double full_equivalence_v =
+                    (yaw_rebased_full_visual
+                         .target_motion.v -
+                     transformed_identity_full_motion.v)
+                        .norm();
+                const double full_equivalence_bg =
+                    (yaw_rebased_full_visual
+                         .target_motion.bg -
+                     transformed_identity_full_motion.bg)
+                        .norm();
+                const double full_equivalence_ba =
+                    (yaw_rebased_full_visual
+                         .target_motion.ba -
+                     transformed_identity_full_motion.ba)
+                        .norm();
+
+                double full_equivalence_inv_depth = 0.0;
+                bool full_inverse_depth_sizes_match =
+                    identity_full_visual
+                        .final_inverse_depths.size() ==
+                    yaw_rebased_full_visual
+                        .final_inverse_depths.size();
+                if (full_inverse_depth_sizes_match) {
+                    for (size_t i = 0;
+                         i < identity_full_visual
+                                 .final_inverse_depths
+                                 .size();
+                         ++i) {
+                        full_equivalence_inv_depth =
+                            std::max(
+                                full_equivalence_inv_depth,
+                                std::abs(
+                                    identity_full_visual
+                                        .final_inverse_depths[i] -
+                                    yaw_rebased_full_visual
+                                        .final_inverse_depths[i]));
+                    }
+                } else {
+                    full_equivalence_inv_depth =
+                        std::numeric_limits<double>::
+                            infinity();
+                }
+
+                std::fprintf(
+                    stderr,
+                    "[PlaceRecoveryFullWindowVisualShadow] "
+                    "event_id=%zu commit_frame=%zu "
+                    "commit_t=%.9f latest_refined_frame=%zu "
+                    "topology=clone_full_refine_window "
+                    "window_frames=%zu prior_frames=%zu "
+                    "target_window_index=%zu "
+                    "visual_track_states=%zu "
+                    "visual_factors=%zu "
+                    "visual_fixed_inv_depth=%zu "
+                    "visual_depth_priors=%zu "
+                    "visual_mapping_failures=%zu "
+                    "ordinary_visual_cauchy=1.000 "
+                    "yaw_correction_deg=%.9f "
+                    "identity_usable=%d "
+                    "identity_prior_bound=%d "
+                    "identity_complete=%d "
+                    "identity_imu_edges=%zu "
+                    "identity_target_delta_seed_t=%.9f "
+                    "identity_target_delta_seed_r_deg=%.9f "
+                    "identity_max_delta_seed_t=%.9f "
+                    "identity_max_delta_seed_r_deg=%.9f "
+                    "identity_max_v_delta=%.9f "
+                    "identity_max_bg_delta=%.9f "
+                    "identity_max_ba_delta=%.9f "
+                    "identity_max_inv_depth_delta=%.9f "
+                    "yaw_rebased_usable=%d "
+                    "yaw_rebased_prior_bound=%d "
+                    "yaw_rebased_prior_rebased=%d "
+                    "yaw_rebased_complete=%d "
+                    "yaw_rebased_imu_edges=%zu "
+                    "yaw_rebased_target_delta_seed_t=%.9f "
+                    "yaw_rebased_target_delta_seed_r_deg=%.9f "
+                    "yaw_rebased_max_delta_seed_t=%.9f "
+                    "yaw_rebased_max_delta_seed_r_deg=%.9f "
+                    "yaw_rebased_max_v_delta=%.9f "
+                    "yaw_rebased_max_bg_delta=%.9f "
+                    "yaw_rebased_max_ba_delta=%.9f "
+                    "yaw_rebased_max_inv_depth_delta=%.9f "
+                    "equivalence_t=%.9f "
+                    "equivalence_r_deg=%.9f "
+                    "equivalence_v=%.9f "
+                    "equivalence_bg=%.9f "
+                    "equivalence_ba=%.9f "
+                    "equivalence_inv_depth_max_abs=%.9f "
+                    "equivalence_inv_depth_sizes_match=%d "
+                    "yaw_rebased_recovery_usable=%d "
+                    "yaw_rebased_recovery_prior_bound=%d "
+                    "yaw_rebased_recovery_prior_rebased=%d "
+                    "yaw_rebased_recovery_complete=%d "
+                    "yaw_rebased_recovery_imu_edges=%zu "
+                    "yaw_rebased_recovery_factors=%zu "
+                    "yaw_rebased_recovery_rmse_px=%.9f "
+                    "yaw_rebased_recovery_target_delta_seed_t=%.9f "
+                    "yaw_rebased_recovery_target_delta_seed_r_deg=%.9f "
+                    "yaw_rebased_recovery_max_delta_seed_t=%.9f "
+                    "yaw_rebased_recovery_max_delta_seed_r_deg=%.9f "
+                    "yaw_rebased_recovery_max_v_delta=%.9f "
+                    "yaw_rebased_recovery_max_bg_delta=%.9f "
+                    "yaw_rebased_recovery_max_ba_delta=%.9f "
+                    "yaw_rebased_recovery_max_inv_depth_delta=%.9f "
+                    "yaw_rebased_recovery_target_to_committed_t=%.9f "
+                    "yaw_rebased_recovery_target_to_committed_r_deg=%.9f "
+                    "state_mutation=0\n",
+                    state.event_id,
+                    state.frame_id,
+                    state.timestamp,
+                    latest_refined_frame_id,
+                    yaw_rebased_full_visual.window_frames,
+                    yaw_rebased_full_visual.prior_frames,
+                    yaw_rebased_full_visual.target_index,
+                    yaw_rebased_full_visual
+                        .visual_track_states,
+                    yaw_rebased_full_visual.visual_factors,
+                    yaw_rebased_full_visual
+                        .visual_fixed_inv_depth,
+                    yaw_rebased_full_visual
+                        .visual_depth_priors,
+                    yaw_rebased_full_visual
+                        .visual_mapping_failures,
+                    std::abs(yaw_correction_rad) *
+                        180.0 / M_PI,
+                    identity_full_visual.usable ? 1 : 0,
+                    identity_full_visual.prior_bound ? 1 : 0,
+                    identity_full_visual.complete ? 1 : 0,
+                    identity_full_visual.imu_edges,
+                    full_visual_target_delta_seed_t(
+                        identity_full_visual),
+                    full_visual_target_delta_seed_r(
+                        identity_full_visual),
+                    identity_full_visual
+                        .max_pose_delta_seed_t,
+                    identity_full_visual
+                        .max_pose_delta_seed_r_deg,
+                    identity_full_visual.max_v_delta,
+                    identity_full_visual.max_bg_delta,
+                    identity_full_visual.max_ba_delta,
+                    identity_full_visual
+                        .max_inv_depth_delta,
+                    yaw_rebased_full_visual.usable ? 1 : 0,
+                    yaw_rebased_full_visual.prior_bound
+                        ? 1
+                        : 0,
+                    yaw_rebased_full_visual.prior_rebased
+                        ? 1
+                        : 0,
+                    yaw_rebased_full_visual.complete
+                        ? 1
+                        : 0,
+                    yaw_rebased_full_visual.imu_edges,
+                    full_visual_target_delta_seed_t(
+                        yaw_rebased_full_visual),
+                    full_visual_target_delta_seed_r(
+                        yaw_rebased_full_visual),
+                    yaw_rebased_full_visual
+                        .max_pose_delta_seed_t,
+                    yaw_rebased_full_visual
+                        .max_pose_delta_seed_r_deg,
+                    yaw_rebased_full_visual.max_v_delta,
+                    yaw_rebased_full_visual.max_bg_delta,
+                    yaw_rebased_full_visual.max_ba_delta,
+                    yaw_rebased_full_visual
+                        .max_inv_depth_delta,
+                    full_equivalence_t,
+                    full_equivalence_r,
+                    full_equivalence_v,
+                    full_equivalence_bg,
+                    full_equivalence_ba,
+                    full_equivalence_inv_depth,
+                    full_inverse_depth_sizes_match ? 1 : 0,
+                    yaw_rebased_full_visual_recovery
+                            .usable
+                        ? 1
+                        : 0,
+                    yaw_rebased_full_visual_recovery
+                            .prior_bound
+                        ? 1
+                        : 0,
+                    yaw_rebased_full_visual_recovery
+                            .prior_rebased
+                        ? 1
+                        : 0,
+                    yaw_rebased_full_visual_recovery
+                            .complete
+                        ? 1
+                        : 0,
+                    yaw_rebased_full_visual_recovery
+                        .imu_edges,
+                    yaw_rebased_full_visual_recovery
+                        .recovery_factors,
+                    yaw_rebased_full_visual_recovery
+                        .recovery_rmse_px,
+                    full_visual_target_delta_seed_t(
+                        yaw_rebased_full_visual_recovery),
+                    full_visual_target_delta_seed_r(
+                        yaw_rebased_full_visual_recovery),
+                    yaw_rebased_full_visual_recovery
+                        .max_pose_delta_seed_t,
+                    yaw_rebased_full_visual_recovery
+                        .max_pose_delta_seed_r_deg,
+                    yaw_rebased_full_visual_recovery
+                        .max_v_delta,
+                    yaw_rebased_full_visual_recovery
+                        .max_bg_delta,
+                    yaw_rebased_full_visual_recovery
+                        .max_ba_delta,
+                    yaw_rebased_full_visual_recovery
+                        .max_inv_depth_delta,
+                    full_visual_target_to_committed_t(
+                        yaw_rebased_full_visual_recovery),
+                    full_visual_target_to_committed_r(
+                        yaw_rebased_full_visual_recovery));
+
                 std::fprintf(
                     stderr,
                     "[PlaceRecoveryMarginalizationShadow] "

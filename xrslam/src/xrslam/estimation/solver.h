@@ -42,6 +42,16 @@ class Solver {
     virtual void add_frame_states(Frame *frame, bool with_motion = true);
     virtual void add_track_states(Track *track);
 
+    // Clone-only diagnostic equivalents of ordinary inverse-depth track
+    // states and reprojection factors. They intentionally avoid allocating
+    // Track objects so shadow experiments do not advance global track IDs.
+    virtual bool add_shadow_track_state(
+        double *inv_depth, Track *source_track);
+    virtual bool add_shadow_reprojection(
+        Frame *frame, size_t keypoint_index,
+        Frame *reference_frame, size_t reference_keypoint_index,
+        double *inv_depth);
+
     // Recovery-only visual observation with a fixed world landmark. The
     // residual uses the same bearing-tangent whitening and robust loss as
     // XRSLAM's ordinary reprojection factors.
