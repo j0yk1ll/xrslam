@@ -3969,6 +3969,455 @@ diagnose_place_recovery_commit_reconciliation() {
                     coherent_bg_delta(yaw_imu_recovery),
                     coherent_ba_delta(yaw_imu_recovery));
 
+                // Whole-window coherent IMU shadow. Transform every active
+                // top-level frame with the same correction, rotate world-frame
+                // velocity, keep body-frame biases unchanged, and reintroduce
+                // every adjacent keyframe-preintegration edge. The oldest
+                // cloned pose+motion is fixed only to remove gauge freedom.
+                // Ordinary visual factors and marginalization remain excluded.
+                struct CoherentWindowImuShadowResult {
+                    bool usable = false;
+                    bool complete = false;
+                    size_t window_frames = 0;
+                    size_t target_index =
+                        static_cast<size_t>(-1);
+                    size_t imu_edges = 0;
+                    size_t recovery_factors = 0;
+                    size_t first_frame_id = 0;
+                    size_t last_frame_id = 0;
+                    PoseState target_seed_pose;
+                    MotionState target_seed_motion;
+                    PoseState target_pose;
+                    MotionState target_motion;
+                    double recovery_rmse_px =
+                        std::numeric_limits<double>::quiet_NaN();
+                    double max_pose_delta_seed_t = 0.0;
+                    double max_pose_delta_seed_r_deg = 0.0;
+                    double max_v_delta = 0.0;
+                    double max_bg_delta = 0.0;
+                    double max_ba_delta = 0.0;
+                    double latest_pose_delta_seed_t = 0.0;
+                    double latest_pose_delta_seed_r_deg = 0.0;
+                };
+
+                const auto run_coherent_window_imu_shadow =
+                    [this, target_top_index, &state,
+                     &recovery_rmse_px](
+                        const quaternion &correction_q,
+                        const vector<3> &correction_p,
+                        bool include_recovery) {
+                        CoherentWindowImuShadowResult result;
+                        const size_t window_frames =
+                            map->frame_num();
+                        result.window_frames = window_frames;
+                        result.target_index = target_top_index;
+
+                        if (!config->has_imu() ||
+                            window_frames < 2 ||
+                            target_top_index == 0 ||
+                            target_top_index >= window_frames) {
+                            return result;
+                        }
+
+                        std::vector<std::unique_ptr<Frame>>
+                            shadow_owners;
+                        std::vector<Frame *> shadow_frames;
+                        std::vector<PoseState> seed_poses;
+                        std::vector<MotionState> seed_motions;
+                        shadow_owners.reserve(window_frames);
+                        shadow_frames.reserve(window_frames);
+                        seed_poses.reserve(window_frames);
+                        seed_motions.reserve(window_frames);
+
+                        for (size_t i = 0;
+                             i < window_frames; ++i) {
+                            Frame *source = map->get_frame(i);
+                            if (!source || !source->image)
+                                return result;
+
+                            std::unique_ptr<Frame> owner =
+                                source->clone();
+                            Frame *shadow = owner.get();
+
+                            shadow->pose.q =
+                                correction_q * shadow->pose.q;
+                            shadow->pose.q.normalize();
+                            shadow->pose.p =
+                                correction_q * shadow->pose.p +
+                                correction_p;
+                            shadow->motion.v =
+                                correction_q * shadow->motion.v;
+
+                            shadow->tag(FT_FIX_POSE) =
+                                (i == 0);
+                            shadow->tag(FT_FIX_MOTION) =
+                                (i == 0);
+
+                            seed_poses.emplace_back(
+                                shadow->pose);
+                            seed_motions.emplace_back(
+                                shadow->motion);
+                            shadow_frames.emplace_back(shadow);
+                            shadow_owners.emplace_back(
+                                std::move(owner));
+                        }
+
+                        result.first_frame_id =
+                            shadow_frames.front()->id();
+                        result.last_frame_id =
+                            shadow_frames.back()->id();
+                        result.target_seed_pose =
+                            shadow_frames[
+                                target_top_index]->pose;
+                        result.target_seed_motion =
+                            shadow_frames[
+                                target_top_index]->motion;
+                        result.target_pose =
+                            result.target_seed_pose;
+                        result.target_motion =
+                            result.target_seed_motion;
+
+                        auto solver = Solver::create();
+                        for (Frame *shadow : shadow_frames)
+                            solver->add_frame_states(shadow);
+
+                        // Preintegration factors hold references, so reserve
+                        // their final storage before creating any factor.
+                        std::vector<PreIntegrator>
+                            shadow_preintegrations;
+                        shadow_preintegrations.reserve(
+                            window_frames - 1);
+
+                        for (size_t i = 1;
+                             i < window_frames; ++i) {
+                            Frame *source_current =
+                                map->get_frame(i);
+                            if (!source_current ||
+                                !source_current->image) {
+                                return result;
+                            }
+
+                            shadow_preintegrations.emplace_back(
+                                source_current
+                                    ->keyframe_preintegration);
+                            PreIntegrator &preintegration =
+                                shadow_preintegrations.back();
+                            Frame *shadow_previous =
+                                shadow_frames[i - 1];
+                            Frame *shadow_current =
+                                shadow_frames[i];
+
+                            if (!preintegration.integrate(
+                                    shadow_current->image->t,
+                                    shadow_previous->motion.bg,
+                                    shadow_previous->motion.ba,
+                                    true, true)) {
+                                return result;
+                            }
+
+                            solver->put_factor(
+                                Solver::
+                                    create_preintegration_error_factor(
+                                        shadow_previous,
+                                        shadow_current,
+                                        preintegration));
+                            ++result.imu_edges;
+                        }
+
+                        Frame *shadow_target =
+                            shadow_frames[
+                                target_top_index];
+                        if (include_recovery) {
+                            for (size_t i = 0;
+                                 i < state
+                                         .recovery_landmarks_world
+                                         .size();
+                                 ++i) {
+                                solver
+                                    ->add_learned_world_reprojection(
+                                        shadow_target,
+                                        state
+                                            .recovery_landmarks_world[i],
+                                        state
+                                            .recovery_observations_pixel[i]);
+                                ++result.recovery_factors;
+                            }
+                        }
+
+                        result.complete =
+                            result.imu_edges + 1 ==
+                            window_frames;
+                        result.usable = solver->solve();
+                        result.target_pose =
+                            shadow_target->pose;
+                        result.target_motion =
+                            shadow_target->motion;
+                        result.recovery_rmse_px =
+                            recovery_rmse_px(
+                                shadow_target->pose);
+
+                        for (size_t i = 0;
+                             i < window_frames; ++i) {
+                            result.max_pose_delta_seed_t =
+                                std::max(
+                                    result
+                                        .max_pose_delta_seed_t,
+                                    (shadow_frames[i]->pose.p -
+                                     seed_poses[i].p)
+                                        .norm());
+                            result.max_pose_delta_seed_r_deg =
+                                std::max(
+                                    result
+                                        .max_pose_delta_seed_r_deg,
+                                    camera_rotation_delta_deg(
+                                        seed_poses[i],
+                                        shadow_frames[i]->pose));
+                            result.max_v_delta =
+                                std::max(
+                                    result.max_v_delta,
+                                    (shadow_frames[i]->motion.v -
+                                     seed_motions[i].v)
+                                        .norm());
+                            result.max_bg_delta =
+                                std::max(
+                                    result.max_bg_delta,
+                                    (shadow_frames[i]->motion.bg -
+                                     seed_motions[i].bg)
+                                        .norm());
+                            result.max_ba_delta =
+                                std::max(
+                                    result.max_ba_delta,
+                                    (shadow_frames[i]->motion.ba -
+                                     seed_motions[i].ba)
+                                        .norm());
+                        }
+
+                        result.latest_pose_delta_seed_t =
+                            (shadow_frames.back()->pose.p -
+                             seed_poses.back().p)
+                                .norm();
+                        result.latest_pose_delta_seed_r_deg =
+                            camera_rotation_delta_deg(
+                                seed_poses.back(),
+                                shadow_frames.back()->pose);
+                        return result;
+                    };
+
+                const CoherentWindowImuShadowResult
+                    full_window_imu =
+                        run_coherent_window_imu_shadow(
+                            full_correction_q,
+                            full_correction_p,
+                            false);
+                const CoherentWindowImuShadowResult
+                    full_window_imu_recovery =
+                        run_coherent_window_imu_shadow(
+                            full_correction_q,
+                            full_correction_p,
+                            true);
+                const CoherentWindowImuShadowResult
+                    yaw_window_imu =
+                        run_coherent_window_imu_shadow(
+                            yaw_correction_q,
+                            yaw_correction_p,
+                            false);
+                const CoherentWindowImuShadowResult
+                    yaw_window_imu_recovery =
+                        run_coherent_window_imu_shadow(
+                            yaw_correction_q,
+                            yaw_correction_p,
+                            true);
+
+                const auto window_target_delta_seed_t =
+                    [](const CoherentWindowImuShadowResult &result) {
+                        return (result.target_pose.p -
+                                result.target_seed_pose.p)
+                            .norm();
+                    };
+                const auto window_target_delta_seed_r =
+                    [](const CoherentWindowImuShadowResult &result) {
+                        return camera_rotation_delta_deg(
+                            result.target_seed_pose,
+                            result.target_pose);
+                    };
+                const auto window_target_to_committed_t =
+                    [&state](
+                        const CoherentWindowImuShadowResult &result) {
+                        return (result.target_pose.p -
+                                state.committed_body_pose.p)
+                            .norm();
+                    };
+                const auto window_target_to_committed_r =
+                    [&state](
+                        const CoherentWindowImuShadowResult &result) {
+                        return camera_rotation_delta_deg(
+                            state.committed_body_pose,
+                            result.target_pose);
+                    };
+                const auto window_target_v_delta =
+                    [](const CoherentWindowImuShadowResult &result) {
+                        return (result.target_motion.v -
+                                result.target_seed_motion.v)
+                            .norm();
+                    };
+
+                std::fprintf(
+                    stderr,
+                    "[PlaceRecoveryCoherentWindowImuShadow] "
+                    "event_id=%zu commit_frame=%zu "
+                    "commit_t=%.9f latest_refined_frame=%zu "
+                    "topology=coherent_active_top_level_window "
+                    "oldest_anchor=pose_motion_fixed "
+                    "marginalization_prior=0 visual_factors=0 "
+                    "window_frames=%zu target_window_index=%zu "
+                    "first_frame=%zu last_frame=%zu "
+                    "full_correction_r_deg=%.9f "
+                    "yaw_correction_deg=%.9f "
+                    "full_imu_usable=%d full_imu_complete=%d "
+                    "full_imu_edges=%zu "
+                    "full_imu_target_delta_seed_t=%.9f "
+                    "full_imu_target_delta_seed_r_deg=%.9f "
+                    "full_imu_max_delta_seed_t=%.9f "
+                    "full_imu_max_delta_seed_r_deg=%.9f "
+                    "full_imu_latest_delta_seed_t=%.9f "
+                    "full_imu_latest_delta_seed_r_deg=%.9f "
+                    "full_imu_target_to_committed_t=%.9f "
+                    "full_imu_target_to_committed_r_deg=%.9f "
+                    "full_imu_recovery_usable=%d "
+                    "full_imu_recovery_complete=%d "
+                    "full_imu_recovery_edges=%zu "
+                    "full_imu_recovery_factors=%zu "
+                    "full_imu_recovery_rmse_px=%.9f "
+                    "full_imu_recovery_target_delta_seed_t=%.9f "
+                    "full_imu_recovery_target_delta_seed_r_deg=%.9f "
+                    "full_imu_recovery_max_delta_seed_t=%.9f "
+                    "full_imu_recovery_max_delta_seed_r_deg=%.9f "
+                    "full_imu_recovery_target_to_committed_t=%.9f "
+                    "full_imu_recovery_target_to_committed_r_deg=%.9f "
+                    "full_imu_recovery_target_v_delta=%.9f "
+                    "full_imu_recovery_max_v_delta=%.9f "
+                    "full_imu_recovery_max_bg_delta=%.9f "
+                    "full_imu_recovery_max_ba_delta=%.9f "
+                    "yaw_imu_usable=%d yaw_imu_complete=%d "
+                    "yaw_imu_edges=%zu "
+                    "yaw_imu_target_delta_seed_t=%.9f "
+                    "yaw_imu_target_delta_seed_r_deg=%.9f "
+                    "yaw_imu_max_delta_seed_t=%.9f "
+                    "yaw_imu_max_delta_seed_r_deg=%.9f "
+                    "yaw_imu_latest_delta_seed_t=%.9f "
+                    "yaw_imu_latest_delta_seed_r_deg=%.9f "
+                    "yaw_imu_target_to_committed_t=%.9f "
+                    "yaw_imu_target_to_committed_r_deg=%.9f "
+                    "yaw_imu_recovery_usable=%d "
+                    "yaw_imu_recovery_complete=%d "
+                    "yaw_imu_recovery_edges=%zu "
+                    "yaw_imu_recovery_factors=%zu "
+                    "yaw_imu_recovery_rmse_px=%.9f "
+                    "yaw_imu_recovery_target_delta_seed_t=%.9f "
+                    "yaw_imu_recovery_target_delta_seed_r_deg=%.9f "
+                    "yaw_imu_recovery_max_delta_seed_t=%.9f "
+                    "yaw_imu_recovery_max_delta_seed_r_deg=%.9f "
+                    "yaw_imu_recovery_target_to_committed_t=%.9f "
+                    "yaw_imu_recovery_target_to_committed_r_deg=%.9f "
+                    "yaw_imu_recovery_target_v_delta=%.9f "
+                    "yaw_imu_recovery_max_v_delta=%.9f "
+                    "yaw_imu_recovery_max_bg_delta=%.9f "
+                    "yaw_imu_recovery_max_ba_delta=%.9f "
+                    "bias_transform=unchanged "
+                    "velocity_transform=world_rotated "
+                    "state_mutation=0\n",
+                    state.event_id,
+                    state.frame_id,
+                    state.timestamp,
+                    latest_refined_frame_id,
+                    full_window_imu.window_frames,
+                    full_window_imu.target_index,
+                    full_window_imu.first_frame_id,
+                    full_window_imu.last_frame_id,
+                    camera_rotation_delta_deg(
+                        target->pose,
+                        state.committed_body_pose),
+                    std::abs(yaw_correction_rad) *
+                        180.0 / M_PI,
+                    full_window_imu.usable ? 1 : 0,
+                    full_window_imu.complete ? 1 : 0,
+                    full_window_imu.imu_edges,
+                    window_target_delta_seed_t(
+                        full_window_imu),
+                    window_target_delta_seed_r(
+                        full_window_imu),
+                    full_window_imu.max_pose_delta_seed_t,
+                    full_window_imu
+                        .max_pose_delta_seed_r_deg,
+                    full_window_imu
+                        .latest_pose_delta_seed_t,
+                    full_window_imu
+                        .latest_pose_delta_seed_r_deg,
+                    window_target_to_committed_t(
+                        full_window_imu),
+                    window_target_to_committed_r(
+                        full_window_imu),
+                    full_window_imu_recovery.usable ? 1 : 0,
+                    full_window_imu_recovery.complete ? 1 : 0,
+                    full_window_imu_recovery.imu_edges,
+                    full_window_imu_recovery.recovery_factors,
+                    full_window_imu_recovery.recovery_rmse_px,
+                    window_target_delta_seed_t(
+                        full_window_imu_recovery),
+                    window_target_delta_seed_r(
+                        full_window_imu_recovery),
+                    full_window_imu_recovery
+                        .max_pose_delta_seed_t,
+                    full_window_imu_recovery
+                        .max_pose_delta_seed_r_deg,
+                    window_target_to_committed_t(
+                        full_window_imu_recovery),
+                    window_target_to_committed_r(
+                        full_window_imu_recovery),
+                    window_target_v_delta(
+                        full_window_imu_recovery),
+                    full_window_imu_recovery.max_v_delta,
+                    full_window_imu_recovery.max_bg_delta,
+                    full_window_imu_recovery.max_ba_delta,
+                    yaw_window_imu.usable ? 1 : 0,
+                    yaw_window_imu.complete ? 1 : 0,
+                    yaw_window_imu.imu_edges,
+                    window_target_delta_seed_t(
+                        yaw_window_imu),
+                    window_target_delta_seed_r(
+                        yaw_window_imu),
+                    yaw_window_imu.max_pose_delta_seed_t,
+                    yaw_window_imu.max_pose_delta_seed_r_deg,
+                    yaw_window_imu.latest_pose_delta_seed_t,
+                    yaw_window_imu
+                        .latest_pose_delta_seed_r_deg,
+                    window_target_to_committed_t(
+                        yaw_window_imu),
+                    window_target_to_committed_r(
+                        yaw_window_imu),
+                    yaw_window_imu_recovery.usable ? 1 : 0,
+                    yaw_window_imu_recovery.complete ? 1 : 0,
+                    yaw_window_imu_recovery.imu_edges,
+                    yaw_window_imu_recovery.recovery_factors,
+                    yaw_window_imu_recovery.recovery_rmse_px,
+                    window_target_delta_seed_t(
+                        yaw_window_imu_recovery),
+                    window_target_delta_seed_r(
+                        yaw_window_imu_recovery),
+                    yaw_window_imu_recovery
+                        .max_pose_delta_seed_t,
+                    yaw_window_imu_recovery
+                        .max_pose_delta_seed_r_deg,
+                    window_target_to_committed_t(
+                        yaw_window_imu_recovery),
+                    window_target_to_committed_r(
+                        yaw_window_imu_recovery),
+                    window_target_v_delta(
+                        yaw_window_imu_recovery),
+                    yaw_window_imu_recovery.max_v_delta,
+                    yaw_window_imu_recovery.max_bg_delta,
+                    yaw_window_imu_recovery.max_ba_delta);
+
                 std::fprintf(
                     stderr,
                     "[PlaceRecoveryFactorIntegrationShadow] "
