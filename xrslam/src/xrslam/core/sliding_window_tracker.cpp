@@ -2489,6 +2489,48 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
                         recovery_camera_pose.q.coeffs().allFinite() &&
                         std::isfinite(recovery_rmse_px);
 
+                    const bool temporal_eligible =
+                        representative.abs_timestamp_separation >=
+                        5.0;
+                    const bool event_confirmed =
+                        group.consecutive_age >= 3;
+                    const bool representative_geometry_verified =
+                        representative.inlier_count >=
+                            min_verified_inliers &&
+                        representative.inlier_ratio >=
+                            min_verified_inlier_ratio;
+                    const bool factor_count_sufficient =
+                        fixed_world_factor_count >= 6;
+                    const bool raw_rmse_improved =
+                        std::isfinite(pnp_seed_rmse_px) &&
+                        std::isfinite(recovery_rmse_px) &&
+                        recovery_rmse_px <=
+                            pnp_seed_rmse_px;
+
+                    const bool acceptance_candidate =
+                        temporal_eligible &&
+                        event_confirmed &&
+                        representative_geometry_verified &&
+                        factor_count_sufficient &&
+                        recovery_usable &&
+                        candidate_finite;
+
+                    const char *acceptance_reason =
+                        !temporal_eligible
+                            ? "temporal_ineligible"
+                        : !event_confirmed
+                            ? "event_unconfirmed"
+                        : !representative_geometry_verified
+                            ? "geometry_unverified"
+                        : !factor_count_sufficient
+                            ? "insufficient_factors"
+                        : !recovery_usable
+                            ? "solver_unusable"
+                        : !candidate_finite
+                            ? "candidate_nonfinite"
+                            : "eligible";
+
+
                     std::fprintf(
                         stderr,
                         "[PlaceRecoverySolveShadow] "
@@ -2547,6 +2589,57 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
                         recovery_camera_pose.q.y(),
                         recovery_camera_pose.q.z(),
                         recovery_camera_pose.q.w());
+
+                    std::fprintf(
+                        stderr,
+                        "[PlaceRecoveryAcceptanceShadow] "
+                        "current=%zu t=%.9f event_id=%zu "
+                        "confirmation_age=%zu "
+                        "representative_key=%llu "
+                        "representative_frame=%zu "
+                        "temporal_eligible=%d "
+                        "event_confirmed=%d "
+                        "geometry_verified=%d "
+                        "factor_count_sufficient=%d "
+                        "solver_usable=%d candidate_finite=%d "
+                        "raw_rmse_improved=%d "
+                        "acceptance_candidate=%d "
+                        "reason=%s "
+                        "pnp_inliers=%zu pnp_ratio=%.6f "
+                        "fixed_world_factors=%zu "
+                        "pnp_seed_rmse_px=%.6f "
+                        "recovery_rmse_px=%.6f "
+                        "recovery_delta_authoritative_t=%.9f "
+                        "recovery_delta_authoritative_r_deg=%.9f "
+                        "recovery_delta_seed_t=%.9f "
+                        "recovery_delta_seed_r_deg=%.9f "
+                        "vio_disagreement_gate=0 "
+                        "rmse_gate=0 "
+                        "acceptance_applied=0 state_mutation=0\n",
+                        frame->id(), frame->image->t,
+                        group.event_id,
+                        group.consecutive_age,
+                        static_cast<unsigned long long>(
+                            representative.key),
+                        representative.reference_frame_id,
+                        temporal_eligible ? 1 : 0,
+                        event_confirmed ? 1 : 0,
+                        representative_geometry_verified ? 1 : 0,
+                        factor_count_sufficient ? 1 : 0,
+                        recovery_usable ? 1 : 0,
+                        candidate_finite ? 1 : 0,
+                        raw_rmse_improved ? 1 : 0,
+                        acceptance_candidate ? 1 : 0,
+                        acceptance_reason,
+                        representative.inlier_count,
+                        representative.inlier_ratio,
+                        fixed_world_factor_count,
+                        pnp_seed_rmse_px,
+                        recovery_rmse_px,
+                        recovery_delta_authoritative_t,
+                        recovery_delta_authoritative_r,
+                        recovery_delta_seed_t,
+                        recovery_delta_seed_r);
                 }
             }
         };
