@@ -56,6 +56,13 @@ class Solver {
     virtual void add_factor(PreIntegrationPriorFactor *pipcost);
     virtual void add_factor(MarginalizationFactor *marcost);
 
+    // Bind an existing marginalization cost to alternate Frame storage.
+    // This is used by clone-only recovery diagnostics; the factor's stored
+    // linearization point/information are read unchanged.
+    virtual bool add_marginalization_factor_for_frames(
+        MarginalizationFactor *marcost,
+        const std::vector<Frame *> &frames);
+
     template <typename T> void put_factor(std::unique_ptr<T> &&factor) {
         add_factor(factor.get());
         manage_factor(std::move(factor));

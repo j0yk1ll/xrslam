@@ -4418,6 +4418,429 @@ diagnose_place_recovery_commit_reconciliation() {
                     yaw_window_imu_recovery.max_bg_delta,
                     yaw_window_imu_recovery.max_ba_delta);
 
+                // Marginalization compatibility shadow. Unlike the 0110g
+                // IMU-only experiment, do not add a synthetic gauge anchor.
+                // Instead bind the actual live marginalization factor to
+                // cloned frame storage, preserving its exact stored
+                // linearization point and information while keeping live
+                // estimator state untouched.
+                struct MarginalizationShadowResult {
+                    bool usable = false;
+                    bool prior_bound = false;
+                    bool complete = false;
+                    size_t window_frames = 0;
+                    size_t prior_frames = 0;
+                    size_t target_index =
+                        static_cast<size_t>(-1);
+                    size_t imu_edges = 0;
+                    size_t recovery_factors = 0;
+                    PoseState target_seed_pose;
+                    MotionState target_seed_motion;
+                    PoseState target_pose;
+                    MotionState target_motion;
+                    double recovery_rmse_px =
+                        std::numeric_limits<double>::quiet_NaN();
+                    double max_pose_delta_seed_t = 0.0;
+                    double max_pose_delta_seed_r_deg = 0.0;
+                    double max_v_delta = 0.0;
+                };
+
+                const auto run_marginalization_shadow =
+                    [this, target_top_index, &state,
+                     &recovery_rmse_px](
+                        const quaternion &correction_q,
+                        const vector<3> &correction_p,
+                        bool include_recovery) {
+                        MarginalizationShadowResult result;
+                        result.window_frames = map->frame_num();
+                        result.target_index = target_top_index;
+
+                        if (!config->has_imu() ||
+                            !map->marginalization_factor ||
+                            result.window_frames < 2 ||
+                            target_top_index >=
+                                result.window_frames) {
+                            return result;
+                        }
+
+                        std::vector<std::unique_ptr<Frame>>
+                            shadow_owners;
+                        std::vector<Frame *> shadow_frames;
+                        std::vector<PoseState> seed_poses;
+                        std::vector<MotionState> seed_motions;
+                        shadow_owners.reserve(
+                            result.window_frames);
+                        shadow_frames.reserve(
+                            result.window_frames);
+                        seed_poses.reserve(
+                            result.window_frames);
+                        seed_motions.reserve(
+                            result.window_frames);
+
+                        for (size_t i = 0;
+                             i < result.window_frames;
+                             ++i) {
+                            Frame *source = map->get_frame(i);
+                            if (!source || !source->image)
+                                return result;
+
+                            std::unique_ptr<Frame> owner =
+                                source->clone();
+                            Frame *shadow = owner.get();
+
+                            shadow->pose.q =
+                                correction_q * shadow->pose.q;
+                            shadow->pose.q.normalize();
+                            shadow->pose.p =
+                                correction_q * shadow->pose.p +
+                                correction_p;
+                            shadow->motion.v =
+                                correction_q * shadow->motion.v;
+
+                            // The real marginalization factor supplies the
+                            // gauge anchor in this experiment.
+                            shadow->tag(FT_FIX_POSE) = false;
+                            shadow->tag(FT_FIX_MOTION) = false;
+
+                            seed_poses.emplace_back(
+                                shadow->pose);
+                            seed_motions.emplace_back(
+                                shadow->motion);
+                            shadow_frames.emplace_back(shadow);
+                            shadow_owners.emplace_back(
+                                std::move(owner));
+                        }
+
+                        Frame *shadow_target =
+                            shadow_frames[target_top_index];
+                        result.target_seed_pose =
+                            shadow_target->pose;
+                        result.target_seed_motion =
+                            shadow_target->motion;
+                        result.target_pose =
+                            result.target_seed_pose;
+                        result.target_motion =
+                            result.target_seed_motion;
+
+                        auto solver = Solver::create();
+                        for (Frame *shadow : shadow_frames)
+                            solver->add_frame_states(shadow);
+
+                        std::vector<PreIntegrator>
+                            shadow_preintegrations;
+                        shadow_preintegrations.reserve(
+                            result.window_frames - 1);
+
+                        for (size_t i = 1;
+                             i < result.window_frames;
+                             ++i) {
+                            Frame *source_current =
+                                map->get_frame(i);
+                            if (!source_current ||
+                                !source_current->image) {
+                                return result;
+                            }
+
+                            shadow_preintegrations.emplace_back(
+                                source_current
+                                    ->keyframe_preintegration);
+                            PreIntegrator &preintegration =
+                                shadow_preintegrations.back();
+                            Frame *shadow_previous =
+                                shadow_frames[i - 1];
+                            Frame *shadow_current =
+                                shadow_frames[i];
+
+                            if (!preintegration.integrate(
+                                    shadow_current->image->t,
+                                    shadow_previous->motion.bg,
+                                    shadow_previous->motion.ba,
+                                    true, true)) {
+                                return result;
+                            }
+
+                            solver->put_factor(
+                                Solver::
+                                    create_preintegration_error_factor(
+                                        shadow_previous,
+                                        shadow_current,
+                                        preintegration));
+                            ++result.imu_edges;
+                        }
+
+                        const auto &prior_sources =
+                            map->marginalization_factor
+                                ->linearization_frames();
+                        result.prior_frames =
+                            prior_sources.size();
+
+                        std::vector<Frame *>
+                            shadow_prior_frames;
+                        shadow_prior_frames.reserve(
+                            prior_sources.size());
+
+                        for (Frame *prior_source :
+                             prior_sources) {
+                            size_t source_index = nil();
+                            for (size_t i = 0;
+                                 i < result.window_frames;
+                                 ++i) {
+                                if (map->get_frame(i) ==
+                                    prior_source) {
+                                    source_index = i;
+                                    break;
+                                }
+                            }
+                            if (source_index == nil())
+                                return result;
+                            shadow_prior_frames.emplace_back(
+                                shadow_frames[source_index]);
+                        }
+
+                        result.prior_bound =
+                            solver
+                                ->add_marginalization_factor_for_frames(
+                                    map->marginalization_factor
+                                        .get(),
+                                    shadow_prior_frames);
+                        if (!result.prior_bound)
+                            return result;
+
+                        if (include_recovery) {
+                            for (size_t i = 0;
+                                 i < state
+                                         .recovery_landmarks_world
+                                         .size();
+                                 ++i) {
+                                solver
+                                    ->add_learned_world_reprojection(
+                                        shadow_target,
+                                        state
+                                            .recovery_landmarks_world[i],
+                                        state
+                                            .recovery_observations_pixel[i]);
+                                ++result.recovery_factors;
+                            }
+                        }
+
+                        result.complete =
+                            result.imu_edges + 1 ==
+                                result.window_frames &&
+                            result.prior_frames > 0;
+                        result.usable = solver->solve();
+                        result.target_pose =
+                            shadow_target->pose;
+                        result.target_motion =
+                            shadow_target->motion;
+                        result.recovery_rmse_px =
+                            recovery_rmse_px(
+                                shadow_target->pose);
+
+                        for (size_t i = 0;
+                             i < result.window_frames;
+                             ++i) {
+                            result.max_pose_delta_seed_t =
+                                std::max(
+                                    result
+                                        .max_pose_delta_seed_t,
+                                    (shadow_frames[i]->pose.p -
+                                     seed_poses[i].p)
+                                        .norm());
+                            result.max_pose_delta_seed_r_deg =
+                                std::max(
+                                    result
+                                        .max_pose_delta_seed_r_deg,
+                                    camera_rotation_delta_deg(
+                                        seed_poses[i],
+                                        shadow_frames[i]->pose));
+                            result.max_v_delta =
+                                std::max(
+                                    result.max_v_delta,
+                                    (shadow_frames[i]->motion.v -
+                                     seed_motions[i].v)
+                                        .norm());
+                        }
+                        return result;
+                    };
+
+                quaternion identity_correction_q;
+                identity_correction_q.setIdentity();
+                vector<3> identity_correction_p;
+                identity_correction_p.setZero();
+
+                const MarginalizationShadowResult
+                    identity_marginalization =
+                        run_marginalization_shadow(
+                            identity_correction_q,
+                            identity_correction_p,
+                            false);
+                const MarginalizationShadowResult
+                    yaw_marginalization =
+                        run_marginalization_shadow(
+                            yaw_correction_q,
+                            yaw_correction_p,
+                            false);
+                const MarginalizationShadowResult
+                    yaw_marginalization_recovery =
+                        run_marginalization_shadow(
+                            yaw_correction_q,
+                            yaw_correction_p,
+                            true);
+
+                const auto marginalization_target_delta_seed_t =
+                    [](const MarginalizationShadowResult &result) {
+                        return (result.target_pose.p -
+                                result.target_seed_pose.p)
+                            .norm();
+                    };
+                const auto marginalization_target_delta_seed_r =
+                    [](const MarginalizationShadowResult &result) {
+                        return camera_rotation_delta_deg(
+                            result.target_seed_pose,
+                            result.target_pose);
+                    };
+                const auto marginalization_target_to_committed_t =
+                    [&state](
+                        const MarginalizationShadowResult &result) {
+                        return (result.target_pose.p -
+                                state.committed_body_pose.p)
+                            .norm();
+                    };
+                const auto marginalization_target_to_committed_r =
+                    [&state](
+                        const MarginalizationShadowResult &result) {
+                        return camera_rotation_delta_deg(
+                            state.committed_body_pose,
+                            result.target_pose);
+                    };
+
+                const double yaw_final_to_identity_final_t =
+                    (yaw_marginalization.target_pose.p -
+                     identity_marginalization.target_pose.p)
+                        .norm();
+                const double yaw_final_to_identity_final_r =
+                    camera_rotation_delta_deg(
+                        identity_marginalization.target_pose,
+                        yaw_marginalization.target_pose);
+
+                std::fprintf(
+                    stderr,
+                    "[PlaceRecoveryMarginalizationShadow] "
+                    "event_id=%zu commit_frame=%zu "
+                    "commit_t=%.9f latest_refined_frame=%zu "
+                    "topology=active_top_level_window "
+                    "visual_factors=0 "
+                    "window_frames=%zu prior_frames=%zu "
+                    "target_window_index=%zu "
+                    "yaw_correction_deg=%.9f "
+                    "identity_usable=%d "
+                    "identity_prior_bound=%d "
+                    "identity_complete=%d "
+                    "identity_imu_edges=%zu "
+                    "identity_target_delta_seed_t=%.9f "
+                    "identity_target_delta_seed_r_deg=%.9f "
+                    "identity_max_delta_seed_t=%.9f "
+                    "identity_max_delta_seed_r_deg=%.9f "
+                    "identity_max_v_delta=%.9f "
+                    "yaw_no_marg_target_delta_seed_t=%.9f "
+                    "yaw_no_marg_target_delta_seed_r_deg=%.9f "
+                    "yaw_usable=%d yaw_prior_bound=%d "
+                    "yaw_complete=%d yaw_imu_edges=%zu "
+                    "yaw_target_delta_seed_t=%.9f "
+                    "yaw_target_delta_seed_r_deg=%.9f "
+                    "yaw_max_delta_seed_t=%.9f "
+                    "yaw_max_delta_seed_r_deg=%.9f "
+                    "yaw_max_v_delta=%.9f "
+                    "yaw_target_to_committed_t=%.9f "
+                    "yaw_target_to_committed_r_deg=%.9f "
+                    "yaw_final_to_identity_final_t=%.9f "
+                    "yaw_final_to_identity_final_r_deg=%.9f "
+                    "yaw_recovery_usable=%d "
+                    "yaw_recovery_prior_bound=%d "
+                    "yaw_recovery_complete=%d "
+                    "yaw_recovery_imu_edges=%zu "
+                    "yaw_recovery_factors=%zu "
+                    "yaw_recovery_rmse_px=%.9f "
+                    "yaw_recovery_target_delta_seed_t=%.9f "
+                    "yaw_recovery_target_delta_seed_r_deg=%.9f "
+                    "yaw_recovery_max_delta_seed_t=%.9f "
+                    "yaw_recovery_max_delta_seed_r_deg=%.9f "
+                    "yaw_recovery_max_v_delta=%.9f "
+                    "yaw_recovery_target_to_committed_t=%.9f "
+                    "yaw_recovery_target_to_committed_r_deg=%.9f "
+                    "marginalization_source=live_read_only "
+                    "state_mutation=0\n",
+                    state.event_id,
+                    state.frame_id,
+                    state.timestamp,
+                    latest_refined_frame_id,
+                    identity_marginalization.window_frames,
+                    identity_marginalization.prior_frames,
+                    identity_marginalization.target_index,
+                    std::abs(yaw_correction_rad) *
+                        180.0 / M_PI,
+                    identity_marginalization.usable ? 1 : 0,
+                    identity_marginalization.prior_bound ? 1 : 0,
+                    identity_marginalization.complete ? 1 : 0,
+                    identity_marginalization.imu_edges,
+                    marginalization_target_delta_seed_t(
+                        identity_marginalization),
+                    marginalization_target_delta_seed_r(
+                        identity_marginalization),
+                    identity_marginalization
+                        .max_pose_delta_seed_t,
+                    identity_marginalization
+                        .max_pose_delta_seed_r_deg,
+                    identity_marginalization.max_v_delta,
+                    window_target_delta_seed_t(
+                        yaw_window_imu),
+                    window_target_delta_seed_r(
+                        yaw_window_imu),
+                    yaw_marginalization.usable ? 1 : 0,
+                    yaw_marginalization.prior_bound ? 1 : 0,
+                    yaw_marginalization.complete ? 1 : 0,
+                    yaw_marginalization.imu_edges,
+                    marginalization_target_delta_seed_t(
+                        yaw_marginalization),
+                    marginalization_target_delta_seed_r(
+                        yaw_marginalization),
+                    yaw_marginalization
+                        .max_pose_delta_seed_t,
+                    yaw_marginalization
+                        .max_pose_delta_seed_r_deg,
+                    yaw_marginalization.max_v_delta,
+                    marginalization_target_to_committed_t(
+                        yaw_marginalization),
+                    marginalization_target_to_committed_r(
+                        yaw_marginalization),
+                    yaw_final_to_identity_final_t,
+                    yaw_final_to_identity_final_r,
+                    yaw_marginalization_recovery.usable ? 1 : 0,
+                    yaw_marginalization_recovery.prior_bound
+                        ? 1
+                        : 0,
+                    yaw_marginalization_recovery.complete
+                        ? 1
+                        : 0,
+                    yaw_marginalization_recovery.imu_edges,
+                    yaw_marginalization_recovery
+                        .recovery_factors,
+                    yaw_marginalization_recovery
+                        .recovery_rmse_px,
+                    marginalization_target_delta_seed_t(
+                        yaw_marginalization_recovery),
+                    marginalization_target_delta_seed_r(
+                        yaw_marginalization_recovery),
+                    yaw_marginalization_recovery
+                        .max_pose_delta_seed_t,
+                    yaw_marginalization_recovery
+                        .max_pose_delta_seed_r_deg,
+                    yaw_marginalization_recovery.max_v_delta,
+                    marginalization_target_to_committed_t(
+                        yaw_marginalization_recovery),
+                    marginalization_target_to_committed_r(
+                        yaw_marginalization_recovery));
+
                 std::fprintf(
                     stderr,
                     "[PlaceRecoveryFactorIntegrationShadow] "

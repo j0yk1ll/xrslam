@@ -323,6 +323,31 @@ void Solver::add_factor(MarginalizationFactor *factor) {
         static_cast<CeresMarginalizationFactor *>(factor), nullptr, params);
 }
 
+bool Solver::add_marginalization_factor_for_frames(
+    MarginalizationFactor *factor,
+    const std::vector<Frame *> &frames) {
+    if (!factor ||
+        frames.size() != factor->linearization_frames().size()) {
+        return false;
+    }
+
+    std::vector<double *> params;
+    params.reserve(frames.size() * 5);
+    for (Frame *frame : frames) {
+        if (!frame)
+            return false;
+        params.emplace_back(frame->pose.q.coeffs().data());
+        params.emplace_back(frame->pose.p.data());
+        params.emplace_back(frame->motion.v.data());
+        params.emplace_back(frame->motion.bg.data());
+        params.emplace_back(frame->motion.ba.data());
+    }
+
+    details->problem->AddResidualBlock(
+        static_cast<CeresMarginalizationFactor *>(factor), nullptr, params);
+    return true;
+}
+
 bool Solver::solve(bool verbose) {
     ceres::Solver::Options solver_options;
     ceres::Solver::Summary solver_summary;
