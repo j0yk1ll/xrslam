@@ -2792,6 +2792,656 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
                             live_ba_delta,
                             live_state_unchanged ? 1 : 0);
 
+                        // 0110k coherent-commit dry run. Construct the exact
+                        // gravity-preserving world-gauge transform that a
+                        // future controlled commit would apply to every
+                        // active top-level frame and attached subframe.
+                        // Nothing below mutates live estimator state.
+                        const quaternion full_correction_q =
+                            (recovery_body_pose.q *
+                             authoritative_body_pose.q
+                                 .conjugate())
+                                .normalized();
+                        const matrix<3> full_correction_R =
+                            full_correction_q.matrix();
+                        const double coherent_yaw_rad =
+                            std::atan2(
+                                full_correction_R(1, 0),
+                                full_correction_R(0, 0));
+                        quaternion coherent_yaw_q;
+                        coherent_yaw_q =
+                            Eigen::AngleAxisd(
+                                coherent_yaw_rad,
+                                Eigen::Vector3d::UnitZ());
+                        coherent_yaw_q.normalize();
+                        const vector<3> coherent_translation =
+                            recovery_body_pose.p -
+                            coherent_yaw_q *
+                                authoritative_body_pose.p;
+
+                        struct CoherentCommitDryRunState {
+                            Frame *frame = nullptr;
+                            bool subframe = false;
+                            PoseState before_pose;
+                            MotionState before_motion;
+                            PoseState proposed_pose;
+                            MotionState proposed_motion;
+                        };
+
+                        std::vector<CoherentCommitDryRunState>
+                            coherent_states;
+                        coherent_states.reserve(
+                            map->frame_num() * 2);
+
+                        std::vector<std::unique_ptr<Frame>>
+                            coherent_top_level_owners;
+                        std::unordered_map<Frame *, Frame *>
+                            coherent_top_level_clones;
+                        coherent_top_level_owners.reserve(
+                            map->frame_num());
+                        coherent_top_level_clones.reserve(
+                            map->frame_num());
+
+                        size_t coherent_top_level_count = 0;
+                        size_t coherent_subframe_count = 0;
+                        bool coherent_source_finite = true;
+                        bool coherent_proposed_finite = true;
+
+                        const auto coherent_pose_finite =
+                            [](const PoseState &pose) {
+                                return pose.p.allFinite() &&
+                                       pose.q.coeffs()
+                                           .allFinite() &&
+                                       std::isfinite(
+                                           pose.q.norm()) &&
+                                       pose.q.norm() >
+                                           1.0e-12;
+                            };
+                        const auto coherent_motion_finite =
+                            [](const MotionState &motion) {
+                                return motion.v.allFinite() &&
+                                       motion.bg.allFinite() &&
+                                       motion.ba.allFinite();
+                            };
+                        const auto coherent_transform_state =
+                            [&coherent_yaw_q,
+                             &coherent_translation](
+                                Frame *source,
+                                bool subframe) {
+                                CoherentCommitDryRunState
+                                    snapshot;
+                                snapshot.frame = source;
+                                snapshot.subframe = subframe;
+                                snapshot.before_pose =
+                                    source->pose;
+                                snapshot.before_motion =
+                                    source->motion;
+                                snapshot.proposed_pose =
+                                    source->pose;
+                                snapshot.proposed_motion =
+                                    source->motion;
+                                snapshot.proposed_pose.q =
+                                    coherent_yaw_q *
+                                    source->pose.q;
+                                snapshot.proposed_pose.q
+                                    .normalize();
+                                snapshot.proposed_pose.p =
+                                    coherent_yaw_q *
+                                        source->pose.p +
+                                    coherent_translation;
+                                snapshot.proposed_motion.v =
+                                    coherent_yaw_q *
+                                    source->motion.v;
+                                return snapshot;
+                            };
+
+                        for (size_t i = 0;
+                             i < map->frame_num();
+                             ++i) {
+                            Frame *top = map->get_frame(i);
+                            if (!top)
+                                continue;
+
+                            CoherentCommitDryRunState
+                                top_snapshot =
+                                    coherent_transform_state(
+                                        top, false);
+                            coherent_source_finite =
+                                coherent_source_finite &&
+                                coherent_pose_finite(
+                                    top_snapshot.before_pose) &&
+                                coherent_motion_finite(
+                                    top_snapshot.before_motion);
+                            coherent_proposed_finite =
+                                coherent_proposed_finite &&
+                                coherent_pose_finite(
+                                    top_snapshot
+                                        .proposed_pose) &&
+                                coherent_motion_finite(
+                                    top_snapshot
+                                        .proposed_motion);
+                            coherent_states.emplace_back(
+                                top_snapshot);
+                            ++coherent_top_level_count;
+
+                            std::unique_ptr<Frame> owner =
+                                top->clone();
+                            Frame *shadow = owner.get();
+                            shadow->pose =
+                                top_snapshot.proposed_pose;
+                            shadow->motion =
+                                top_snapshot.proposed_motion;
+                            coherent_top_level_clones[top] =
+                                shadow;
+                            coherent_top_level_owners
+                                .emplace_back(
+                                    std::move(owner));
+
+                            for (const auto &sub_owner :
+                                 top->subframes) {
+                                Frame *sub =
+                                    sub_owner.get();
+                                if (!sub)
+                                    continue;
+                                CoherentCommitDryRunState
+                                    sub_snapshot =
+                                        coherent_transform_state(
+                                            sub, true);
+                                coherent_source_finite =
+                                    coherent_source_finite &&
+                                    coherent_pose_finite(
+                                        sub_snapshot
+                                            .before_pose) &&
+                                    coherent_motion_finite(
+                                        sub_snapshot
+                                            .before_motion);
+                                coherent_proposed_finite =
+                                    coherent_proposed_finite &&
+                                    coherent_pose_finite(
+                                        sub_snapshot
+                                            .proposed_pose) &&
+                                    coherent_motion_finite(
+                                        sub_snapshot
+                                            .proposed_motion);
+                                coherent_states.emplace_back(
+                                    sub_snapshot);
+                                ++coherent_subframe_count;
+                            }
+                        }
+
+                        const auto coherent_rotation_delta_deg =
+                            [](const quaternion &a,
+                               const quaternion &b) {
+                                quaternion delta =
+                                    a.conjugate() * b;
+                                delta.normalize();
+                                return 2.0 *
+                                       std::atan2(
+                                           delta.vec().norm(),
+                                           std::abs(delta.w())) *
+                                       180.0 / M_PI;
+                            };
+
+                        double coherent_max_relative_t_error =
+                            0.0;
+                        double coherent_max_relative_r_error =
+                            0.0;
+                        for (size_t i = 0;
+                             i < coherent_states.size();
+                             ++i) {
+                            for (size_t j = i + 1;
+                                 j < coherent_states.size();
+                                 ++j) {
+                                const auto &a =
+                                    coherent_states[i];
+                                const auto &b =
+                                    coherent_states[j];
+
+                                const vector<3>
+                                    before_relative_p =
+                                        a.before_pose.q
+                                            .conjugate() *
+                                        (b.before_pose.p -
+                                         a.before_pose.p);
+                                const vector<3>
+                                    proposed_relative_p =
+                                        a.proposed_pose.q
+                                            .conjugate() *
+                                        (b.proposed_pose.p -
+                                         a.proposed_pose.p);
+                                coherent_max_relative_t_error =
+                                    std::max(
+                                        coherent_max_relative_t_error,
+                                        (proposed_relative_p -
+                                         before_relative_p)
+                                            .norm());
+
+                                const quaternion
+                                    before_relative_q =
+                                        a.before_pose.q
+                                            .conjugate() *
+                                        b.before_pose.q;
+                                const quaternion
+                                    proposed_relative_q =
+                                        a.proposed_pose.q
+                                            .conjugate() *
+                                        b.proposed_pose.q;
+                                coherent_max_relative_r_error =
+                                    std::max(
+                                        coherent_max_relative_r_error,
+                                        coherent_rotation_delta_deg(
+                                            before_relative_q,
+                                            proposed_relative_q));
+                            }
+                        }
+
+                        double
+                            coherent_max_velocity_transform_error =
+                                0.0;
+                        double
+                            coherent_max_velocity_norm_error =
+                                0.0;
+                        double coherent_max_bg_delta = 0.0;
+                        double coherent_max_ba_delta = 0.0;
+                        for (const auto &snapshot :
+                             coherent_states) {
+                            coherent_max_velocity_transform_error =
+                                std::max(
+                                    coherent_max_velocity_transform_error,
+                                    (snapshot.proposed_motion.v -
+                                     coherent_yaw_q *
+                                         snapshot.before_motion.v)
+                                        .norm());
+                            coherent_max_velocity_norm_error =
+                                std::max(
+                                    coherent_max_velocity_norm_error,
+                                    std::abs(
+                                        snapshot
+                                            .proposed_motion.v
+                                            .norm() -
+                                        snapshot
+                                            .before_motion.v
+                                            .norm()));
+                            coherent_max_bg_delta =
+                                std::max(
+                                    coherent_max_bg_delta,
+                                    (snapshot
+                                         .proposed_motion.bg -
+                                     snapshot.before_motion.bg)
+                                        .norm());
+                            coherent_max_ba_delta =
+                                std::max(
+                                    coherent_max_ba_delta,
+                                    (snapshot
+                                         .proposed_motion.ba -
+                                     snapshot.before_motion.ba)
+                                        .norm());
+                        }
+
+                        PoseState coherent_target_pose =
+                            authoritative_body_pose;
+                        MotionState coherent_target_motion =
+                            authoritative_motion;
+                        bool coherent_target_found = false;
+                        for (const auto &snapshot :
+                             coherent_states) {
+                            if (snapshot.frame == frame) {
+                                coherent_target_pose =
+                                    snapshot.proposed_pose;
+                                coherent_target_motion =
+                                    snapshot.proposed_motion;
+                                coherent_target_found = true;
+                                break;
+                            }
+                        }
+
+                        PoseState
+                            expected_coherent_target_pose;
+                        expected_coherent_target_pose.q =
+                            coherent_yaw_q *
+                            authoritative_body_pose.q;
+                        expected_coherent_target_pose.q.normalize();
+                        expected_coherent_target_pose.p =
+                            recovery_body_pose.p;
+                        const double
+                            coherent_target_position_error =
+                                (coherent_target_pose.p -
+                                 recovery_body_pose.p)
+                                    .norm();
+                        const double
+                            coherent_target_orientation_formula_error =
+                                coherent_rotation_delta_deg(
+                                    expected_coherent_target_pose.q,
+                                    coherent_target_pose.q);
+                        const double
+                            coherent_target_to_full_recovery_r =
+                                camera_rotation_delta_deg(
+                                    recovery_body_pose,
+                                    coherent_target_pose);
+                        const double
+                            coherent_target_v_transform_error =
+                                (coherent_target_motion.v -
+                                 coherent_yaw_q *
+                                     authoritative_motion.v)
+                                    .norm();
+
+                        std::vector<Frame *>
+                            live_prior_frames;
+                        if (map->marginalization_factor) {
+                            live_prior_frames =
+                                map->marginalization_factor
+                                    ->linearization_frames();
+                        }
+                        std::vector<Frame *>
+                            coherent_prior_frames;
+                        coherent_prior_frames.reserve(
+                            live_prior_frames.size());
+                        bool coherent_prior_mapping_complete =
+                            map->marginalization_factor !=
+                            nullptr;
+                        for (Frame *prior_frame :
+                             live_prior_frames) {
+                            const auto it =
+                                coherent_top_level_clones
+                                    .find(prior_frame);
+                            if (it ==
+                                coherent_top_level_clones
+                                    .end()) {
+                                coherent_prior_mapping_complete =
+                                    false;
+                                break;
+                            }
+                            coherent_prior_frames
+                                .emplace_back(it->second);
+                        }
+
+                        std::unique_ptr<MarginalizationFactor>
+                            coherent_rebased_prior;
+                        if (coherent_prior_mapping_complete) {
+                            coherent_rebased_prior =
+                                map->marginalization_factor
+                                    ->clone_rebased_world(
+                                        coherent_prior_frames,
+                                        coherent_yaw_q,
+                                        coherent_translation);
+                        }
+                        const bool
+                            coherent_marginalization_rebase_success =
+                                coherent_rebased_prior != nullptr;
+                        bool coherent_rebased_prior_frames_match =
+                            coherent_marginalization_rebase_success &&
+                            coherent_rebased_prior
+                                    ->linearization_frames()
+                                    .size() ==
+                                coherent_prior_frames.size();
+                        if (coherent_rebased_prior_frames_match) {
+                            const auto &rebased_frames =
+                                coherent_rebased_prior
+                                    ->linearization_frames();
+                            for (size_t i = 0;
+                                 i < rebased_frames.size();
+                                 ++i) {
+                                if (rebased_frames[i] !=
+                                    coherent_prior_frames[i]) {
+                                    coherent_rebased_prior_frames_match =
+                                        false;
+                                    break;
+                                }
+                            }
+                        }
+
+                        std::vector<std::pair<Track *, double>>
+                            coherent_inverse_depth_snapshot;
+                        coherent_inverse_depth_snapshot.reserve(
+                            map->track_num());
+                        for (size_t i = 0;
+                             i < map->track_num();
+                             ++i) {
+                            Track *track =
+                                map->get_track(i);
+                            if (track) {
+                                coherent_inverse_depth_snapshot
+                                    .emplace_back(
+                                        track,
+                                        track->landmark
+                                            .inv_depth);
+                            }
+                        }
+
+                        double coherent_live_max_pose_t_delta =
+                            0.0;
+                        double coherent_live_max_q_coeff_delta =
+                            0.0;
+                        double coherent_live_max_v_delta = 0.0;
+                        double coherent_live_max_bg_delta = 0.0;
+                        double coherent_live_max_ba_delta = 0.0;
+                        for (const auto &snapshot :
+                             coherent_states) {
+                            coherent_live_max_pose_t_delta =
+                                std::max(
+                                    coherent_live_max_pose_t_delta,
+                                    (snapshot.frame->pose.p -
+                                     snapshot.before_pose.p)
+                                        .norm());
+                            coherent_live_max_q_coeff_delta =
+                                std::max(
+                                    coherent_live_max_q_coeff_delta,
+                                    (snapshot.frame
+                                         ->pose.q.coeffs() -
+                                     snapshot
+                                         .before_pose.q
+                                         .coeffs())
+                                        .norm());
+                            coherent_live_max_v_delta =
+                                std::max(
+                                    coherent_live_max_v_delta,
+                                    (snapshot.frame->motion.v -
+                                     snapshot.before_motion.v)
+                                        .norm());
+                            coherent_live_max_bg_delta =
+                                std::max(
+                                    coherent_live_max_bg_delta,
+                                    (snapshot.frame->motion.bg -
+                                     snapshot.before_motion.bg)
+                                        .norm());
+                            coherent_live_max_ba_delta =
+                                std::max(
+                                    coherent_live_max_ba_delta,
+                                    (snapshot.frame->motion.ba -
+                                     snapshot.before_motion.ba)
+                                        .norm());
+                        }
+
+                        double
+                            coherent_live_max_inv_depth_delta =
+                                0.0;
+                        bool
+                            coherent_inverse_depth_unchanged =
+                                true;
+                        for (const auto &[track, before] :
+                             coherent_inverse_depth_snapshot) {
+                            const double after =
+                                track->landmark.inv_depth;
+                            const bool equal =
+                                before == after ||
+                                (std::isnan(before) &&
+                                 std::isnan(after));
+                            coherent_inverse_depth_unchanged =
+                                coherent_inverse_depth_unchanged &&
+                                equal;
+                            if (std::isfinite(before) &&
+                                std::isfinite(after)) {
+                                coherent_live_max_inv_depth_delta =
+                                    std::max(
+                                        coherent_live_max_inv_depth_delta,
+                                        std::abs(after - before));
+                            }
+                        }
+
+                        const bool
+                            coherent_all_live_state_unchanged =
+                                coherent_live_max_pose_t_delta ==
+                                    0.0 &&
+                                coherent_live_max_q_coeff_delta ==
+                                    0.0 &&
+                                coherent_live_max_v_delta ==
+                                    0.0 &&
+                                coherent_live_max_bg_delta ==
+                                    0.0 &&
+                                coherent_live_max_ba_delta ==
+                                    0.0 &&
+                                coherent_inverse_depth_unchanged;
+
+                        const bool
+                            coherent_relative_geometry_invariant =
+                                coherent_max_relative_t_error <=
+                                    1.0e-9 &&
+                                coherent_max_relative_r_error <=
+                                    1.0e-7;
+                        const bool
+                            coherent_motion_transform_valid =
+                                coherent_max_velocity_transform_error <=
+                                    1.0e-12 &&
+                                coherent_max_bg_delta == 0.0 &&
+                                coherent_max_ba_delta == 0.0;
+                        const bool
+                            coherent_target_transform_valid =
+                                coherent_target_found &&
+                                coherent_target_position_error <=
+                                    1.0e-12 &&
+                                coherent_target_orientation_formula_error <=
+                                    1.0e-7 &&
+                                coherent_target_v_transform_error <=
+                                    1.0e-12;
+                        const bool coherent_target_ready =
+                            target_is_latest;
+                        const bool coherent_dry_run_ready =
+                            coherent_target_ready &&
+                            coherent_source_finite &&
+                            coherent_proposed_finite &&
+                            coherent_relative_geometry_invariant &&
+                            coherent_motion_transform_valid &&
+                            coherent_target_transform_valid &&
+                            coherent_prior_mapping_complete &&
+                            coherent_marginalization_rebase_success &&
+                            coherent_rebased_prior_frames_match &&
+                            coherent_all_live_state_unchanged;
+
+                        std::fprintf(
+                            stderr,
+                            "[PlaceRecoveryCoherentCommitDryRun] "
+                            "current=%zu t=%.9f event_id=%zu "
+                            "acceptance_candidate=1 "
+                            "commit_enabled=%d "
+                            "commit_scope=active_window_gauge "
+                            "gravity_policy=yaw_translation "
+                            "velocity_transform=world_yaw "
+                            "bias_transform=unchanged "
+                            "inverse_depth_transform=unchanged "
+                            "target_is_latest=%d "
+                            "target_has_subframes=%d "
+                            "supports_target_subframes=1 "
+                            "coherent_target_ready=%d "
+                            "coherent_dry_run_ready=%d "
+                            "top_level_frames=%zu "
+                            "subframes=%zu active_states=%zu "
+                            "prior_frames=%zu "
+                            "yaw_correction_deg=%.9f "
+                            "full_recovery_correction_r_deg=%.9f "
+                            "translation=%.9f,%.9f,%.9f "
+                            "source_state_finite=%d "
+                            "proposed_state_finite=%d "
+                            "relative_geometry_invariant=%d "
+                            "max_relative_t_error=%.12g "
+                            "max_relative_r_error_deg=%.12g "
+                            "motion_transform_valid=%d "
+                            "max_velocity_transform_error=%.12g "
+                            "max_velocity_norm_error=%.12g "
+                            "max_bg_delta=%.12g "
+                            "max_ba_delta=%.12g "
+                            "target_found=%d "
+                            "target_position_error=%.12g "
+                            "target_orientation_formula_error_deg=%.12g "
+                            "target_to_full_recovery_r_deg=%.9f "
+                            "target_v_transform_error=%.12g "
+                            "prior_mapping_complete=%d "
+                            "marginalization_rebase_success=%d "
+                            "rebased_prior_frames_match=%d "
+                            "inverse_depth_states=%zu "
+                            "inverse_depth_unchanged=%d "
+                            "live_max_inv_depth_delta=%.12g "
+                            "live_max_pose_t_delta=%.12g "
+                            "live_max_q_coeff_delta=%.12g "
+                            "live_max_v_delta=%.12g "
+                            "live_max_bg_delta=%.12g "
+                            "live_max_ba_delta=%.12g "
+                            "live_state_unchanged=%d "
+                            "would_transform_top_level=1 "
+                            "would_transform_subframes=1 "
+                            "would_rebase_marginalization=1 "
+                            "would_mutate_inverse_depth=0 "
+                            "estimator_reset=0 loop_constraint=0 "
+                            "commit_applied=0 state_mutation=0\n",
+                            frame->id(),
+                            frame->image->t,
+                            group.event_id,
+                            commit_enabled ? 1 : 0,
+                            target_is_latest ? 1 : 0,
+                            target_has_subframes ? 1 : 0,
+                            coherent_target_ready ? 1 : 0,
+                            coherent_dry_run_ready ? 1 : 0,
+                            coherent_top_level_count,
+                            coherent_subframe_count,
+                            coherent_states.size(),
+                            live_prior_frames.size(),
+                            std::abs(coherent_yaw_rad) *
+                                180.0 / M_PI,
+                            commit_delta_r,
+                            coherent_translation.x(),
+                            coherent_translation.y(),
+                            coherent_translation.z(),
+                            coherent_source_finite ? 1 : 0,
+                            coherent_proposed_finite ? 1 : 0,
+                            coherent_relative_geometry_invariant
+                                ? 1
+                                : 0,
+                            coherent_max_relative_t_error,
+                            coherent_max_relative_r_error,
+                            coherent_motion_transform_valid
+                                ? 1
+                                : 0,
+                            coherent_max_velocity_transform_error,
+                            coherent_max_velocity_norm_error,
+                            coherent_max_bg_delta,
+                            coherent_max_ba_delta,
+                            coherent_target_found ? 1 : 0,
+                            coherent_target_position_error,
+                            coherent_target_orientation_formula_error,
+                            coherent_target_to_full_recovery_r,
+                            coherent_target_v_transform_error,
+                            coherent_prior_mapping_complete
+                                ? 1
+                                : 0,
+                            coherent_marginalization_rebase_success
+                                ? 1
+                                : 0,
+                            coherent_rebased_prior_frames_match
+                                ? 1
+                                : 0,
+                            coherent_inverse_depth_snapshot.size(),
+                            coherent_inverse_depth_unchanged
+                                ? 1
+                                : 0,
+                            coherent_live_max_inv_depth_delta,
+                            coherent_live_max_pose_t_delta,
+                            coherent_live_max_q_coeff_delta,
+                            coherent_live_max_v_delta,
+                            coherent_live_max_bg_delta,
+                            coherent_live_max_ba_delta,
+                            coherent_all_live_state_unchanged
+                                ? 1
+                                : 0);
+
                         if (commit_enabled &&
                             !commit_preconditions_met) {
                             const char *skip_reason =
