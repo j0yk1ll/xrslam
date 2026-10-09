@@ -3,6 +3,7 @@
 
 #include <xrslam/common.h>
 #include <xrslam/core/keyframe_archive.h>
+#include <xrslam/core/place_graph_4dof_shadow.h>
 #include <xrslam/estimation/state.h>
 #include <xrslam/place_recognition.h>
 
@@ -108,6 +109,7 @@ class SlidingWindowTracker {
 
     KeyframeArchive keyframe_archive_;
     PlaceKeyframeStore place_keyframes_;
+    std::vector<PlaceGraph4DoFEdge> place_graph_4dof_edges_;
     std::vector<PendingPlaceRetrieval>
         pending_place_retrieval_candidates_;
     size_t previous_verified_current_frame_id_ =

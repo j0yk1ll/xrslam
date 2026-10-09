@@ -1,6 +1,8 @@
 #include <argparse.hpp>
 #include <chrono>
+#include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <thread>
 #include <mutex>
 #include <unistd.h>
@@ -77,6 +79,10 @@ int main(int argc, char *argv[]) {
         .help("Disable LiteViz and exit when dataset processing completes.")
         .default_value(false)
         .implicit_value(true);
+    program.add_argument("--max-camera-frames")
+        .help("Stop after processing N camera frames (0 = unlimited).")
+        .nargs(1)
+        .default_value(std::string("0"));
     program.add_argument("input").help("input file");
     program.parse_args(argc, argv);
     std::string data_path = program.get<std::string>("input");
@@ -87,6 +93,26 @@ int main(int argc, char *argv[]) {
     std::string tum_output = program.get<std::string>("--tum");
     headless = program.get<bool>("--headless");
     bool isRunning = program.get<bool>("-p") || headless;
+
+    const std::string max_camera_frames_arg =
+        program.get<std::string>("--max-camera-frames");
+    char *max_camera_frames_end = nullptr;
+    const unsigned long long max_camera_frames_parsed =
+        std::strtoull(max_camera_frames_arg.c_str(),
+                      &max_camera_frames_end, 10);
+    if (max_camera_frames_arg.empty() ||
+        max_camera_frames_arg.front() == '-' ||
+        max_camera_frames_end == max_camera_frames_arg.c_str() ||
+        *max_camera_frames_end != '\0' ||
+        max_camera_frames_parsed >
+            static_cast<unsigned long long>(
+                std::numeric_limits<size_t>::max())) {
+        std::cerr << "Invalid --max-camera-frames value: "
+                  << max_camera_frames_arg << std::endl;
+        return EXIT_FAILURE;
+    }
+    const size_t max_camera_frames =
+        static_cast<size_t>(max_camera_frames_parsed);
 
     // create slam with configuration files
     void *yaml_config = nullptr;
@@ -115,6 +141,7 @@ int main(int argc, char *argv[]) {
     outputs.emplace_back(std::make_unique<ConsoleTrajectoryWriter>());
     DatasetReader::NextDataType next_type;
     size_t processed_camera_frames = 0;
+    bool camera_frame_limit_reached = false;
 
     if (!headless) {
         viewer = std::make_shared<Viewer>("XRSLAM PC", 1280, 720);
@@ -139,7 +166,8 @@ int main(int argc, char *argv[]) {
 
     const auto dataset_processing_start = std::chrono::steady_clock::now();
 
-    while ((next_type = reader->next()) != DatasetReader::END) {
+    while (!camera_frame_limit_reached &&
+           (next_type = reader->next()) != DatasetReader::END) {
 
         switch (next_type) {
         case DatasetReader::AGAIN:
@@ -214,10 +242,20 @@ int main(int argc, char *argv[]) {
                     }
                 }
             }
+
+            if (max_camera_frames > 0 &&
+                processed_camera_frames >= max_camera_frames) {
+                camera_frame_limit_reached = true;
+            }
         } break;
         default: {
         } break;
         }
+    }
+
+    if (camera_frame_limit_reached) {
+        std::cerr << "[XRSLAM Player] max camera frame limit reached: "
+                  << processed_camera_frames << std::endl;
     }
 
     const auto dataset_processing_end = std::chrono::steady_clock::now();

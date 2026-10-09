@@ -2,6 +2,7 @@
 #include <xrslam/core/detail.h>
 #include <xrslam/core/feature_tracker.h>
 #include <xrslam/core/keyframe_archive.h>
+#include <xrslam/core/place_graph_4dof_shadow.h>
 #include <xrslam/core/frontend_worker.h>
 #include <xrslam/core/recovery_learned_map.h>
 #include <xrslam/core/recovery_pose_cache.h>
@@ -19,6 +20,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <exception>
 #include <limits>
@@ -45,15 +47,15 @@ bool place_recovery_commit_enabled() {
     return value && std::string(value) == "1";
 }
 
-bool place_recovery_churn_suppression_enabled() {
-    const char *value =
-        std::getenv("XRSLAM_PLACE_RECOVERY_CHURN_SUPPRESSION");
-    return value && std::string(value) == "1";
-}
-
 bool place_recovery_factor_shadow_enabled() {
     const char *value =
         std::getenv("XRSLAM_PLACE_RECOVERY_FACTOR_SHADOW");
+    return value && std::string(value) == "1";
+}
+
+bool place_graph_4dof_shadow_enabled() {
+    const char *value =
+        std::getenv("XRSLAM_PLACE_GRAPH_4DOF_SHADOW");
     return value && std::string(value) == "1";
 }
 
@@ -214,7 +216,8 @@ bool keyframe_archive_shadow_enabled() {
     const char *value =
         std::getenv("XRSLAM_KEYFRAME_ARCHIVE_SHADOW");
     return (value && std::string(value) == "1") ||
-           local_descriptor_shadow_enabled();
+           local_descriptor_shadow_enabled() ||
+           place_graph_4dof_shadow_enabled();
 }
 
 const char *local_descriptor_type_name(LocalDescriptorType type) {
@@ -270,6 +273,268 @@ double camera_rotation_delta_deg(
         -1.0,
         std::min(1.0, (R_delta.trace() - 1.0) * 0.5));
     return std::acos(cosine) * 180.0 / M_PI;
+}
+
+struct PnpDirectionalConditioningDiagnostic {
+    size_t observation_count = 0;
+    bool finite = false;
+    double reprojection_rmse_px =
+        std::numeric_limits<double>::quiet_NaN();
+    double information_condition =
+        std::numeric_limits<double>::quiet_NaN();
+    vector<3> sigma_translation_ref_m =
+        vector<3>::Constant(
+            std::numeric_limits<double>::quiet_NaN());
+    vector<3> sigma_rotation_world_deg =
+        vector<3>::Constant(
+            std::numeric_limits<double>::quiet_NaN());
+    double estimated_pixel_sigma_px =
+        std::numeric_limits<double>::quiet_NaN();
+    double graph_covariance_condition =
+        std::numeric_limits<double>::quiet_NaN();
+    matrix<4> graph_covariance_unit =
+        matrix<4>::Constant(
+            std::numeric_limits<double>::quiet_NaN());
+    vector<4> graph_covariance_eigenvalues =
+        vector<4>::Constant(
+            std::numeric_limits<double>::quiet_NaN());
+    vector<4> graph_weak_mode =
+        vector<4>::Constant(
+            std::numeric_limits<double>::quiet_NaN());
+    double graph_sigma_rms =
+        std::numeric_limits<double>::quiet_NaN();
+    double graph_residual_gain = 1.0;
+};
+
+PnpDirectionalConditioningDiagnostic
+pnp_directional_conditioning(
+    const PoseState &body_pose,
+    const ExtrinsicParams &camera,
+    const matrix<3> &K,
+    const PoseState &reference_body_pose,
+    const std::vector<vector<3>> &landmarks_world,
+    const std::vector<vector<2>> &observations_pixel) {
+    PnpDirectionalConditioningDiagnostic diagnostic;
+    if (landmarks_world.size() < 4 ||
+        landmarks_world.size() != observations_pixel.size()) {
+        return diagnostic;
+    }
+
+    diagnostic.observation_count = landmarks_world.size();
+
+    const auto project =
+        [&camera, &K](
+            const PoseState &pose,
+            const vector<3> &landmark_world,
+            vector<2> &pixel) {
+            const vector<3> point_center =
+                pose.q.conjugate() *
+                (landmark_world - pose.p);
+            const vector<3> point_camera =
+                camera.q_cs.conjugate() *
+                (point_center - camera.p_cs);
+            if (!point_camera.allFinite() ||
+                point_camera.z() <= 1.0e-6) {
+                return false;
+            }
+            pixel = apply_k(point_camera, K);
+            return pixel.allFinite();
+        };
+
+    Eigen::MatrixXd J(
+        2 * static_cast<Eigen::Index>(landmarks_world.size()),
+        6);
+    double squared_error = 0.0;
+
+    for (size_t i = 0; i < landmarks_world.size(); ++i) {
+        vector<2> projected;
+        if (!project(body_pose, landmarks_world[i], projected)) {
+            return diagnostic;
+        }
+        squared_error +=
+            (projected - observations_pixel[i]).squaredNorm();
+    }
+
+    diagnostic.reprojection_rmse_px =
+        std::sqrt(
+            squared_error /
+            static_cast<double>(landmarks_world.size()));
+
+    constexpr double translation_step_m = 1.0e-4;
+    constexpr double rotation_step_rad = 1.0e-5;
+    const matrix<3> reference_R =
+        reference_body_pose.q.matrix();
+
+    for (size_t column = 0; column < 6; ++column) {
+        PoseState plus = body_pose;
+        PoseState minus = body_pose;
+        const double step =
+            column < 3
+                ? translation_step_m
+                : rotation_step_rad;
+
+        if (column < 3) {
+            const vector<3> direction =
+                reference_R.col(
+                    static_cast<Eigen::Index>(column));
+            plus.p += step * direction;
+            minus.p -= step * direction;
+        } else {
+            vector<3> axis = vector<3>::Zero();
+            axis(static_cast<Eigen::Index>(column - 3)) = 1.0;
+            const quaternion plus_delta(
+                Eigen::AngleAxisd(step, axis));
+            const quaternion minus_delta(
+                Eigen::AngleAxisd(-step, axis));
+            plus.q = plus_delta * body_pose.q;
+            minus.q = minus_delta * body_pose.q;
+            plus.q.normalize();
+            minus.q.normalize();
+        }
+
+        for (size_t i = 0; i < landmarks_world.size(); ++i) {
+            vector<2> projected_plus;
+            vector<2> projected_minus;
+            if (!project(
+                    plus, landmarks_world[i], projected_plus) ||
+                !project(
+                    minus, landmarks_world[i], projected_minus)) {
+                return diagnostic;
+            }
+            J.block<2, 1>(
+                2 * static_cast<Eigen::Index>(i),
+                static_cast<Eigen::Index>(column)) =
+                (projected_plus - projected_minus) /
+                (2.0 * step);
+        }
+    }
+
+    const Eigen::Matrix<double, 6, 6> information =
+        J.transpose() * J;
+    const Eigen::SelfAdjointEigenSolver<
+        Eigen::Matrix<double, 6, 6>> eigen_solver(information);
+    if (eigen_solver.info() != Eigen::Success) {
+        return diagnostic;
+    }
+
+    const auto eigenvalues = eigen_solver.eigenvalues();
+    const double min_information = eigenvalues.minCoeff();
+    const double max_information = eigenvalues.maxCoeff();
+    if (!std::isfinite(min_information) ||
+        !std::isfinite(max_information) ||
+        min_information <= 0.0 ||
+        max_information <= 0.0 ||
+        min_information <= max_information * 1.0e-12) {
+        return diagnostic;
+    }
+
+    diagnostic.information_condition =
+        max_information / min_information;
+    const Eigen::Matrix<double, 6, 6> covariance =
+        information.ldlt().solve(
+            Eigen::Matrix<double, 6, 6>::Identity());
+    if (!covariance.allFinite()) {
+        return diagnostic;
+    }
+
+    for (size_t i = 0; i < 3; ++i) {
+        diagnostic.sigma_translation_ref_m(
+            static_cast<Eigen::Index>(i)) =
+            std::sqrt(std::max(
+                0.0,
+                covariance(
+                    static_cast<Eigen::Index>(i),
+                    static_cast<Eigen::Index>(i))));
+        diagnostic.sigma_rotation_world_deg(
+            static_cast<Eigen::Index>(i)) =
+            std::sqrt(std::max(
+                0.0,
+                covariance(
+                    static_cast<Eigen::Index>(i + 3),
+                    static_cast<Eigen::Index>(i + 3)))) *
+            180.0 / M_PI;
+    }
+
+    const double residual_dof = std::max(
+        1.0,
+        2.0 * static_cast<double>(landmarks_world.size()) - 6.0);
+    diagnostic.estimated_pixel_sigma_px =
+        std::sqrt(squared_error / residual_dof);
+
+    constexpr std::array<Eigen::Index, 4> graph_indices = {
+        0, 1, 2, 5};
+    matrix<4> graph_covariance_rad;
+    for (Eigen::Index r = 0; r < 4; ++r) {
+        for (Eigen::Index c = 0; c < 4; ++c) {
+            graph_covariance_rad(r, c) =
+                covariance(graph_indices[r], graph_indices[c]);
+        }
+    }
+
+    matrix<4> graph_unit_scale = matrix<4>::Identity();
+    graph_unit_scale(3, 3) = 0.1 * 180.0 / M_PI;
+    diagnostic.graph_covariance_unit =
+        graph_unit_scale * graph_covariance_rad * graph_unit_scale;
+
+    const Eigen::SelfAdjointEigenSolver<matrix<4>>
+        graph_covariance_eigen_solver(
+            diagnostic.graph_covariance_unit);
+    if (graph_covariance_eigen_solver.info() != Eigen::Success) {
+        return diagnostic;
+    }
+
+    diagnostic.graph_covariance_eigenvalues =
+        graph_covariance_eigen_solver.eigenvalues();
+    const double min_graph_covariance =
+        diagnostic.graph_covariance_eigenvalues.minCoeff();
+    const double max_graph_covariance =
+        diagnostic.graph_covariance_eigenvalues.maxCoeff();
+    if (!std::isfinite(min_graph_covariance) ||
+        !std::isfinite(max_graph_covariance) ||
+        min_graph_covariance <= 0.0 ||
+        max_graph_covariance <= 0.0) {
+        return diagnostic;
+    }
+
+    diagnostic.graph_covariance_condition =
+        max_graph_covariance / min_graph_covariance;
+    diagnostic.graph_sigma_rms =
+        diagnostic.estimated_pixel_sigma_px *
+        std::sqrt(std::max(
+            0.0, diagnostic.graph_covariance_unit.trace() / 4.0));
+    // Frozen development calibration: median graph-space RMS
+    // uncertainty of accepted V2_03 place edges, fixed before
+    // held-out V2_02 evaluation.
+    constexpr double graph_reference_sigma_rms =
+        0.03049885884247795;
+    if (std::isfinite(diagnostic.graph_sigma_rms) &&
+        diagnostic.graph_sigma_rms > 0.0) {
+        diagnostic.graph_residual_gain = std::min(
+            1.0,
+            graph_reference_sigma_rms / diagnostic.graph_sigma_rms);
+    }
+    diagnostic.graph_weak_mode =
+        graph_covariance_eigen_solver.eigenvectors().col(3);
+    Eigen::Index weak_mode_largest_index = 0;
+    diagnostic.graph_weak_mode.cwiseAbs().maxCoeff(
+        &weak_mode_largest_index);
+    if (diagnostic.graph_weak_mode(weak_mode_largest_index) < 0.0) {
+        diagnostic.graph_weak_mode *= -1.0;
+    }
+
+    diagnostic.finite =
+        diagnostic.sigma_translation_ref_m.allFinite() &&
+        diagnostic.sigma_rotation_world_deg.allFinite() &&
+        diagnostic.graph_covariance_unit.allFinite() &&
+        diagnostic.graph_covariance_eigenvalues.allFinite() &&
+        diagnostic.graph_weak_mode.allFinite() &&
+        std::isfinite(diagnostic.reprojection_rmse_px) &&
+        std::isfinite(diagnostic.estimated_pixel_sigma_px) &&
+        std::isfinite(diagnostic.graph_sigma_rms) &&
+        std::isfinite(diagnostic.graph_residual_gain) &&
+        std::isfinite(diagnostic.information_condition) &&
+        std::isfinite(diagnostic.graph_covariance_condition);
+    return diagnostic;
 }
 
 } // namespace
@@ -585,6 +850,30 @@ void SlidingWindowTracker::archive_optimized_keyframes() {
 
         const bool inserted =
             keyframe_archive_.upsert(std::move(archived));
+
+        // 0112b exact graph-node export. Emit every archive upsert so
+        // offline graph reconstruction can retain the latest optimized
+        // snapshot for each keyframe instead of approximating it from
+        // the output trajectory. This is diagnostic-only.
+        const ArchivedKeyframe *graph_node =
+            keyframe_archive_.get(frame->id());
+        if (graph_node) {
+            std::fprintf(
+                stderr,
+                "[PlaceGraphNodeShadow] frame_id=%zu t=%.9f "
+                "body_p=%.9f,%.9f,%.9f "
+                "body_q=%.9f,%.9f,%.9f,%.9f "
+                "inserted=%d refreshed=%d state_mutation=0\n",
+                graph_node->frame_id, graph_node->timestamp,
+                graph_node->body_pose.p.x(),
+                graph_node->body_pose.p.y(),
+                graph_node->body_pose.p.z(),
+                graph_node->body_pose.q.x(),
+                graph_node->body_pose.q.y(),
+                graph_node->body_pose.q.z(),
+                graph_node->body_pose.q.w(),
+                inserted ? 1 : 0, inserted ? 0 : 1);
+        }
 
         if (orb_association_shadow_enabled()) {
             const ArchivedKeyframe *stored =
@@ -2553,6 +2842,333 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
                             : "eligible";
 
 
+                    // 0112a: export the exact body-frame relative
+                    // place edge used by the shadow 4-DoF graph experiments.
+                    // The reference endpoint is the archived optimized body
+                    // pose; the current endpoint is the recovered body pose.
+                    // This is diagnostic only and does not mutate estimator
+                    // or place-recovery state.
+                    const ArchivedKeyframe *graph_reference =
+                        keyframe_archive_.get(
+                            representative.reference_frame_id);
+                    if (!graph_reference) {
+                        std::fprintf(
+                            stderr,
+                            "[PlaceGraphEdgeShadow] "
+                            "current=%zu t=%.9f event_id=%zu "
+                            "reference_frame=%zu "
+                            "reject=reference_not_archived "
+                            "acceptance_candidate=%d "
+                            "state_mutation=0\n",
+                            frame->id(), frame->image->t,
+                            group.event_id,
+                            representative.reference_frame_id,
+                            acceptance_candidate ? 1 : 0);
+                    } else {
+                        const PoseState &graph_reference_body_pose =
+                            graph_reference->body_pose;
+                        const vector<3> graph_relative_t =
+                            graph_reference_body_pose.q.conjugate() *
+                            (recovery_body_pose.p -
+                             graph_reference_body_pose.p);
+                        const matrix<3> graph_reference_R =
+                            graph_reference_body_pose.q.matrix();
+                        const matrix<3> graph_recovery_R =
+                            recovery_body_pose.q.matrix();
+                        const double graph_reference_yaw_rad =
+                            std::atan2(
+                                graph_reference_R(1, 0),
+                                graph_reference_R(0, 0));
+                        const double graph_recovery_yaw_rad =
+                            std::atan2(
+                                graph_recovery_R(1, 0),
+                                graph_recovery_R(0, 0));
+                        const double graph_relative_yaw_deg =
+                            std::remainder(
+                                (graph_recovery_yaw_rad -
+                                 graph_reference_yaw_rad) *
+                                    180.0 / M_PI,
+                                360.0);
+                        const bool graph_edge_finite =
+                            graph_reference_body_pose.p.allFinite() &&
+                            graph_reference_body_pose.q.coeffs()
+                                .allFinite() &&
+                            recovery_body_pose.p.allFinite() &&
+                            recovery_body_pose.q.coeffs().allFinite() &&
+                            graph_relative_t.allFinite() &&
+                            std::isfinite(graph_relative_yaw_deg);
+
+                        double graph_residual_gain = 1.0;
+                        if (acceptance_candidate && graph_edge_finite) {
+                            const auto conditioning =
+                                pnp_directional_conditioning(
+                                    recovery_body_pose,
+                                    frame->camera,
+                                    frame->K,
+                                    graph_reference_body_pose,
+                                    representative.inlier_landmarks_world,
+                                    representative
+                                        .inlier_observations_pixel);
+                            if (conditioning.finite) {
+                                graph_residual_gain =
+                                    conditioning.graph_residual_gain;
+                            }
+                            std::fprintf(
+                                stderr,
+                                "[PlacePnPConditioningShadow] "
+                                "current=%zu t=%.9f event_id=%zu "
+                                "reference_frame=%zu inliers=%zu "
+                                "observations=%zu finite=%d "
+                                "reprojection_rmse_px=%.9f "
+                                "information_condition=%.9g "
+                                "sigma_t_ref_m=%.9g,%.9g,%.9g "
+                                "sigma_r_world_deg=%.9g,%.9g,%.9g "
+                                "pixel_sigma_hat_px=%.9g "
+                                "graph_cov_condition=%.9g "
+                                "graph_sigma_rms=%.9g "
+                                "graph_residual_gain=%.9g "
+                                "graph_cov4_unit="
+                                "%.9g,%.9g,%.9g,%.9g,"
+                                "%.9g,%.9g,%.9g,%.9g,"
+                                "%.9g,%.9g,%.9g,%.9g,"
+                                "%.9g,%.9g,%.9g,%.9g "
+                                "graph_cov_eigenvalues="
+                                "%.9g,%.9g,%.9g,%.9g "
+                                "graph_weak_mode="
+                                "%.9g,%.9g,%.9g,%.9g "
+                                "graph_units=tx_m,ty_m,tz_m,yaw_deg_x0p1 "
+                                "unit_pixel_sigma=1 state_mutation=0\n",
+                                frame->id(), frame->image->t,
+                                group.event_id,
+                                representative.reference_frame_id,
+                                representative.inlier_count,
+                                conditioning.observation_count,
+                                conditioning.finite ? 1 : 0,
+                                conditioning.reprojection_rmse_px,
+                                conditioning.information_condition,
+                                conditioning.sigma_translation_ref_m.x(),
+                                conditioning.sigma_translation_ref_m.y(),
+                                conditioning.sigma_translation_ref_m.z(),
+                                conditioning.sigma_rotation_world_deg.x(),
+                                conditioning.sigma_rotation_world_deg.y(),
+                                conditioning.sigma_rotation_world_deg.z(),
+                                conditioning.estimated_pixel_sigma_px,
+                                conditioning.graph_covariance_condition,
+                                conditioning.graph_sigma_rms,
+                                conditioning.graph_residual_gain,
+                                conditioning.graph_covariance_unit(0, 0),
+                                conditioning.graph_covariance_unit(0, 1),
+                                conditioning.graph_covariance_unit(0, 2),
+                                conditioning.graph_covariance_unit(0, 3),
+                                conditioning.graph_covariance_unit(1, 0),
+                                conditioning.graph_covariance_unit(1, 1),
+                                conditioning.graph_covariance_unit(1, 2),
+                                conditioning.graph_covariance_unit(1, 3),
+                                conditioning.graph_covariance_unit(2, 0),
+                                conditioning.graph_covariance_unit(2, 1),
+                                conditioning.graph_covariance_unit(2, 2),
+                                conditioning.graph_covariance_unit(2, 3),
+                                conditioning.graph_covariance_unit(3, 0),
+                                conditioning.graph_covariance_unit(3, 1),
+                                conditioning.graph_covariance_unit(3, 2),
+                                conditioning.graph_covariance_unit(3, 3),
+                                conditioning.graph_covariance_eigenvalues(0),
+                                conditioning.graph_covariance_eigenvalues(1),
+                                conditioning.graph_covariance_eigenvalues(2),
+                                conditioning.graph_covariance_eigenvalues(3),
+                                conditioning.graph_weak_mode(0),
+                                conditioning.graph_weak_mode(1),
+                                conditioning.graph_weak_mode(2),
+                                conditioning.graph_weak_mode(3));
+                        }
+
+                        std::fprintf(
+                            stderr,
+                            "[PlaceGraphEdgeShadow] "
+                            "current=%zu t=%.9f event_id=%zu "
+                            "reference_frame=%zu reference_t=%.9f "
+                            "reference_body_p=%.9f,%.9f,%.9f "
+                            "reference_body_q=%.9f,%.9f,%.9f,%.9f "
+                            "recovered_body_p=%.9f,%.9f,%.9f "
+                            "recovered_body_q=%.9f,%.9f,%.9f,%.9f "
+                            "relative_t_ref=%.9f,%.9f,%.9f "
+                            "relative_yaw_deg=%.9f "
+                            "pnp_inliers=%zu pnp_ratio=%.6f "
+                            "acceptance_candidate=%d edge_finite=%d "
+                            "state_mutation=0\n",
+                            frame->id(), frame->image->t,
+                            group.event_id,
+                            representative.reference_frame_id,
+                            graph_reference->timestamp,
+                            graph_reference_body_pose.p.x(),
+                            graph_reference_body_pose.p.y(),
+                            graph_reference_body_pose.p.z(),
+                            graph_reference_body_pose.q.x(),
+                            graph_reference_body_pose.q.y(),
+                            graph_reference_body_pose.q.z(),
+                            graph_reference_body_pose.q.w(),
+                            recovery_body_pose.p.x(),
+                            recovery_body_pose.p.y(),
+                            recovery_body_pose.p.z(),
+                            recovery_body_pose.q.x(),
+                            recovery_body_pose.q.y(),
+                            recovery_body_pose.q.z(),
+                            recovery_body_pose.q.w(),
+                            graph_relative_t.x(),
+                            graph_relative_t.y(),
+                            graph_relative_t.z(),
+                            graph_relative_yaw_deg,
+                            representative.inlier_count,
+                            representative.inlier_ratio,
+                            acceptance_candidate ? 1 : 0,
+                            graph_edge_finite ? 1 : 0);
+                        if (place_graph_4dof_shadow_enabled() &&
+                            acceptance_candidate &&
+                            graph_edge_finite) {
+                            PlaceGraph4DoFEdge graph_edge;
+                            graph_edge.event_id = group.event_id;
+                            graph_edge.reference_frame_id =
+                                representative.reference_frame_id;
+                            graph_edge.current_frame_id = frame->id();
+                            graph_edge.relative_translation =
+                                graph_relative_t;
+                            graph_edge.relative_yaw_deg =
+                                graph_relative_yaw_deg;
+                            graph_edge.residual_gain =
+                                graph_residual_gain;
+
+                            const auto existing_edge =
+                                std::find_if(
+                                    place_graph_4dof_edges_.begin(),
+                                    place_graph_4dof_edges_.end(),
+                                    [&graph_edge](
+                                        const PlaceGraph4DoFEdge &edge) {
+                                        return edge.event_id ==
+                                               graph_edge.event_id;
+                                    });
+                            if (existing_edge ==
+                                place_graph_4dof_edges_.end()) {
+                                place_graph_4dof_edges_.emplace_back(
+                                    graph_edge);
+                            } else {
+                                *existing_edge = graph_edge;
+                            }
+
+                            const PlaceGraph4DoFSolveResult
+                                graph_result =
+                                    solve_place_graph_4dof_shadow(
+                                        keyframe_archive_,
+                                        place_graph_4dof_edges_);
+                            const PlaceGraph4DoFCorrection
+                                *current_correction =
+                                    graph_result.find_correction(
+                                        frame->id());
+                            const double graph_nan =
+                                std::numeric_limits<double>::quiet_NaN();
+                            const double current_yaw_correction_deg =
+                                current_correction
+                                    ? current_correction->yaw_deg
+                                    : graph_nan;
+                            const vector<3> current_translation =
+                                current_correction
+                                    ? current_correction->translation
+                                    : vector<3>::Constant(graph_nan);
+                            const double current_translation_norm =
+                                current_correction
+                                    ? current_translation.norm()
+                                    : graph_nan;
+
+                            std::fprintf(
+                                stderr,
+                                "[PlaceGraph4DoFSolveShadow] "
+                                "current=%zu t=%.9f event_id=%zu "
+                                "nodes=%zu odometry_edges=%zu "
+                                "loop_edges=%zu iterations=%zu "
+                                "initial_cost=%.12g final_cost=%.12g "
+                                "usable=%d "
+                                "current_correction_available=%d "
+                                "current_yaw_correction_deg=%.9f "
+                                "current_translation=%.9f,%.9f,%.9f "
+                                "current_translation_norm=%.9f "
+                                "state_mutation=0\n",
+                                frame->id(), frame->image->t,
+                                group.event_id,
+                                graph_result.node_count,
+                                graph_result.odometry_edge_count,
+                                graph_result.loop_edge_count,
+                                graph_result.iterations,
+                                graph_result.initial_cost,
+                                graph_result.final_cost,
+                                graph_result.usable ? 1 : 0,
+                                current_correction ? 1 : 0,
+                                current_yaw_correction_deg,
+                                current_translation.x(),
+                                current_translation.y(),
+                                current_translation.z(),
+                                current_translation_norm);
+
+                            for (const PlaceGraph4DoFEdge &edge :
+                                 place_graph_4dof_edges_) {
+                                const PlaceGraph4DoFCorrection
+                                    *edge_correction =
+                                        graph_result.find_correction(
+                                            edge.current_frame_id);
+                                const double edge_yaw_deg =
+                                    edge_correction
+                                        ? edge_correction->yaw_deg
+                                        : graph_nan;
+                                const vector<3> edge_translation =
+                                    edge_correction
+                                        ? edge_correction->translation
+                                        : vector<3>::Constant(graph_nan);
+                                const double edge_translation_norm =
+                                    edge_correction
+                                        ? edge_translation.norm()
+                                        : graph_nan;
+                                std::fprintf(
+                                    stderr,
+                                    "[PlaceGraph4DoFEventCorrectionShadow] "
+                                    "solve_event_id=%zu edge_event_id=%zu "
+                                    "frame_id=%zu correction_available=%d "
+                                    "yaw_correction_deg=%.9f "
+                                    "translation=%.9f,%.9f,%.9f "
+                                    "translation_norm=%.9f "
+                                    "state_mutation=0\n",
+                                    group.event_id,
+                                    edge.event_id,
+                                    edge.current_frame_id,
+                                    edge_correction ? 1 : 0,
+                                    edge_yaw_deg,
+                                    edge_translation.x(),
+                                    edge_translation.y(),
+                                    edge_translation.z(),
+                                    edge_translation_norm);
+                            }
+
+                            if (graph_result.usable) {
+                                for (const auto &node_correction :
+                                     graph_result.corrections) {
+                                    std::fprintf(
+                                        stderr,
+                                        "[PlaceGraph4DoFNodeCorrectionShadow] "
+                                        "solve_event_id=%zu frame_id=%zu "
+                                        "t=%.9f yaw_correction_deg=%.9f "
+                                        "translation=%.9f,%.9f,%.9f "
+                                        "translation_norm=%.9f "
+                                        "state_mutation=0\n",
+                                        group.event_id,
+                                        node_correction.frame_id,
+                                        node_correction.timestamp,
+                                        node_correction.yaw_deg,
+                                        node_correction.translation.x(),
+                                        node_correction.translation.y(),
+                                        node_correction.translation.z(),
+                                        node_correction.translation.norm());
+                                }
+                            }
+                        }
+                    }
+
                     std::fprintf(
                         stderr,
                         "[PlaceRecoverySolveShadow] "
@@ -2662,6 +3278,411 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
                         recovery_delta_authoritative_r,
                         recovery_delta_seed_t,
                         recovery_delta_seed_r);
+
+                    // 0111b: opt-in, diagnostic-only event evidence export.
+                    // This emits one summary row when an event first reaches
+                    // confirmation age three. No exported quantity is used
+                    // by retrieval, acceptance, recovery, or commit logic.
+                    const char *event_csv_path =
+                        std::getenv(
+                            "XRSLAM_PLACE_RECOVERY_EVENT_CSV");
+                    if (event_csv_path &&
+                        event_csv_path[0] != '\0') {
+                        double support_min_x =
+                            std::numeric_limits<double>::infinity();
+                        double support_max_x =
+                            -std::numeric_limits<double>::infinity();
+                        double support_min_y =
+                            std::numeric_limits<double>::infinity();
+                        double support_max_y =
+                            -std::numeric_limits<double>::infinity();
+                        size_t support_count = 0;
+                        for (const auto &observation :
+                             representative
+                                 .inlier_observations_pixel) {
+                            if (!observation.allFinite())
+                                continue;
+                            support_min_x =
+                                std::min(
+                                    support_min_x,
+                                    observation.x());
+                            support_max_x =
+                                std::max(
+                                    support_max_x,
+                                    observation.x());
+                            support_min_y =
+                                std::min(
+                                    support_min_y,
+                                    observation.y());
+                            support_max_y =
+                                std::max(
+                                    support_max_y,
+                                    observation.y());
+                            ++support_count;
+                        }
+
+                        const double support_width_px =
+                            support_count > 0
+                                ? support_max_x - support_min_x
+                                : std::numeric_limits<double>::
+                                      quiet_NaN();
+                        const double support_height_px =
+                            support_count > 0
+                                ? support_max_y - support_min_y
+                                : std::numeric_limits<double>::
+                                      quiet_NaN();
+                        const double support_area_px2 =
+                            support_count > 0
+                                ? support_width_px *
+                                      support_height_px
+                                : std::numeric_limits<double>::
+                                      quiet_NaN();
+
+                        vector<3> landmark_centroid =
+                            vector<3>::Zero();
+                        size_t landmark_count = 0;
+                        for (const auto &landmark :
+                             representative
+                                 .inlier_landmarks_world) {
+                            if (!landmark.allFinite())
+                                continue;
+                            landmark_centroid += landmark;
+                            ++landmark_count;
+                        }
+
+                        double landmark_rms_radius_m =
+                            std::numeric_limits<double>::
+                                quiet_NaN();
+                        if (landmark_count > 0) {
+                            landmark_centroid /=
+                                static_cast<double>(
+                                    landmark_count);
+                            double squared_radius_sum = 0.0;
+                            for (const auto &landmark :
+                                 representative
+                                     .inlier_landmarks_world) {
+                                if (!landmark.allFinite())
+                                    continue;
+                                squared_radius_sum +=
+                                    (landmark -
+                                     landmark_centroid)
+                                        .squaredNorm();
+                            }
+                            landmark_rms_radius_m =
+                                std::sqrt(
+                                    squared_radius_sum /
+                                    static_cast<double>(
+                                        landmark_count));
+                        }
+
+                        const size_t current_keypoints =
+                            frame->keypoint_num();
+                        size_t current_tracks = 0;
+                        size_t current_valid_tracks = 0;
+                        size_t current_triangulated_tracks = 0;
+                        size_t current_static_tracks = 0;
+                        size_t current_mapped_tracks = 0;
+                        size_t current_outlier_tracks = 0;
+                        size_t current_visual_factor_tracks = 0;
+                        size_t current_reprojection_count = 0;
+                        double current_reprojection_squared_error = 0.0;
+
+                        for (size_t keypoint_index = 0;
+                             keypoint_index < frame->keypoint_num();
+                             ++keypoint_index) {
+                            Track *track =
+                                frame->get_track(keypoint_index);
+                            if (!track)
+                                continue;
+
+                            ++current_tracks;
+                            if (track->tag(TT_VALID))
+                                ++current_valid_tracks;
+                            if (track->tag(TT_TRIANGULATED))
+                                ++current_triangulated_tracks;
+                            if (track->tag(TT_STATIC))
+                                ++current_static_tracks;
+                            if (track->tag(TT_OUTLIER))
+                                ++current_outlier_tracks;
+
+                            if (!track->all_tagged(
+                                    TT_VALID,
+                                    TT_TRIANGULATED,
+                                    TT_STATIC)) {
+                                continue;
+                            }
+
+                            ++current_mapped_tracks;
+                            if (!track->first_frame()
+                                     ->tag(FT_KEYFRAME) ||
+                                frame == track->first_frame()) {
+                                continue;
+                            }
+
+                            ++current_visual_factor_tracks;
+                            const vector<3> landmark_world =
+                                track->get_landmark_point();
+                            if (!landmark_world.allFinite())
+                                continue;
+
+                            const vector<3> point_camera =
+                                authoritative_camera_pose.q
+                                    .conjugate() *
+                                (landmark_world -
+                                 authoritative_camera_pose.p);
+                            if (!point_camera.allFinite() ||
+                                point_camera.z() <= 1.0e-6) {
+                                continue;
+                            }
+
+                            const vector<2> projected =
+                                apply_k(point_camera, frame->K);
+                            const vector<2> observed =
+                                apply_k(
+                                    frame->get_keypoint(
+                                        keypoint_index),
+                                    frame->K);
+                            if (!projected.allFinite() ||
+                                !observed.allFinite()) {
+                                continue;
+                            }
+
+                            const double error =
+                                (projected - observed).norm();
+                            current_reprojection_squared_error +=
+                                error * error;
+                            ++current_reprojection_count;
+                        }
+
+                        const double current_mapped_ratio =
+                            current_keypoints > 0
+                                ? static_cast<double>(
+                                      current_mapped_tracks) /
+                                      static_cast<double>(
+                                          current_keypoints)
+                                : std::numeric_limits<double>::
+                                      quiet_NaN();
+                        const double current_visual_factor_ratio =
+                            current_keypoints > 0
+                                ? static_cast<double>(
+                                      current_visual_factor_tracks) /
+                                      static_cast<double>(
+                                          current_keypoints)
+                                : std::numeric_limits<double>::
+                                      quiet_NaN();
+                        const double current_reprojection_rmse_px =
+                            current_reprojection_count > 0
+                                ? std::sqrt(
+                                      current_reprojection_squared_error /
+                                      static_cast<double>(
+                                          current_reprojection_count))
+                                : std::numeric_limits<double>::
+                                      quiet_NaN();
+
+                        size_t window_subframes = 0;
+                        for (size_t frame_index = 0;
+                             frame_index < map->frame_num();
+                             ++frame_index) {
+                            Frame *window_frame =
+                                map->get_frame(frame_index);
+                            if (window_frame) {
+                                window_subframes +=
+                                    window_frame->subframes.size();
+                            }
+                        }
+
+                        size_t window_mapped_tracks = 0;
+                        size_t window_outlier_tracks = 0;
+                        size_t window_trash_tracks = 0;
+                        for (size_t track_index = 0;
+                             track_index < map->track_num();
+                             ++track_index) {
+                            Track *track =
+                                map->get_track(track_index);
+                            if (!track)
+                                continue;
+                            if (track->all_tagged(
+                                    TT_VALID,
+                                    TT_TRIANGULATED,
+                                    TT_STATIC)) {
+                                ++window_mapped_tracks;
+                            }
+                            if (track->tag(TT_OUTLIER))
+                                ++window_outlier_tracks;
+                            if (track->tag(TT_TRASH))
+                                ++window_trash_tracks;
+                        }
+
+                        const double current_speed_mps =
+                            frame->motion.v.norm();
+
+                        FILE *event_csv =
+                            std::fopen(event_csv_path, "a");
+                        if (!event_csv) {
+                            static bool event_csv_open_warned =
+                                false;
+                            if (!event_csv_open_warned) {
+                                std::fprintf(
+                                    stderr,
+                                    "[PlaceRecoveryEventCsv] "
+                                    "path=%s open_failed=1 "
+                                    "diagnostic_only=1\n",
+                                    event_csv_path);
+                                event_csv_open_warned = true;
+                            }
+                        } else {
+                            std::fseek(
+                                event_csv, 0, SEEK_END);
+                            const long event_csv_size =
+                                std::ftell(event_csv);
+                            if (event_csv_size <= 0) {
+                                std::fprintf(
+                                    event_csv,
+                                    "schema_version,"
+                                    "current_frame,current_t,"
+                                    "event_id,confirmation_age,"
+                                    "member_count,"
+                                    "reference_t_min,"
+                                    "reference_t_max,"
+                                    "reference_frame_min,"
+                                    "reference_frame_max,"
+                                    "representative_key,"
+                                    "representative_frame,"
+                                    "representative_t,"
+                                    "representative_rank,"
+                                    "representative_distance,"
+                                    "abs_timestamp_separation,"
+                                    "correspondences,inliers,"
+                                    "inlier_ratio,"
+                                    "inlier_bbox_width_px,"
+                                    "inlier_bbox_height_px,"
+                                    "inlier_bbox_area_px2,"
+                                    "landmark_rms_radius_m,"
+                                    "current_keypoints,"
+                                    "current_tracks,"
+                                    "current_valid_tracks,"
+                                    "current_triangulated_tracks,"
+                                    "current_static_tracks,"
+                                    "current_mapped_tracks,"
+                                    "current_mapped_ratio,"
+                                    "current_outlier_tracks,"
+                                    "current_visual_factor_tracks,"
+                                    "current_visual_factor_ratio,"
+                                    "current_reprojection_count,"
+                                    "current_reprojection_rmse_px,"
+                                    "window_top_level_frames,"
+                                    "window_subframes,"
+                                    "window_tracks,"
+                                    "window_mapped_tracks,"
+                                    "window_outlier_tracks,"
+                                    "window_trash_tracks,"
+                                    "current_speed_mps,"
+                                    "pnp_translation_delta_m,"
+                                    "pnp_rotation_delta_deg,"
+                                    "fixed_world_factors,"
+                                    "pnp_seed_rmse_px,"
+                                    "recovery_rmse_px,"
+                                    "seed_delta_authoritative_t,"
+                                    "seed_delta_authoritative_r_deg,"
+                                    "recovery_delta_authoritative_t,"
+                                    "recovery_delta_authoritative_r_deg,"
+                                    "recovery_delta_seed_t,"
+                                    "recovery_delta_seed_r_deg,"
+                                    "solver_usable,"
+                                    "candidate_finite,"
+                                    "raw_rmse_improved,"
+                                    "acceptance_candidate,"
+                                    "acceptance_reason\n");
+                            }
+
+                            std::fprintf(
+                                event_csv,
+                                "2,%zu,%.9f,%zu,%zu,%zu,"
+                                "%.9f,%.9f,%zu,%zu,%llu,%zu,"
+                                "%.9f,%zu,%.9f,%.9f,%zu,%zu,"
+                                "%.9f,%.9f,%.9f,%.9f,%.9f,"
+                                "%zu,%zu,%zu,%zu,%zu,%zu,%.9f,"
+                                "%zu,%zu,%.9f,%zu,%.9f,"
+                                "%zu,%zu,%zu,%zu,%zu,%zu,%.9f,"
+                                "%.9f,%.9f,%zu,%.9f,%.9f,"
+                                "%.9f,%.9f,%.9f,%.9f,%.9f,"
+                                "%.9f,%d,%d,%d,%d,%s\n",
+                                frame->id(),
+                                frame->image->t,
+                                group.event_id,
+                                group.consecutive_age,
+                                group.member_count,
+                                group.reference_t_min,
+                                group.reference_t_max,
+                                group.reference_frame_min,
+                                group.reference_frame_max,
+                                static_cast<unsigned long long>(
+                                    representative.key),
+                                representative.reference_frame_id,
+                                representative.reference_timestamp,
+                                representative.rank,
+                                representative.distance,
+                                representative
+                                    .abs_timestamp_separation,
+                                representative
+                                    .correspondence_count,
+                                representative.inlier_count,
+                                representative.inlier_ratio,
+                                support_width_px,
+                                support_height_px,
+                                support_area_px2,
+                                landmark_rms_radius_m,
+                                current_keypoints,
+                                current_tracks,
+                                current_valid_tracks,
+                                current_triangulated_tracks,
+                                current_static_tracks,
+                                current_mapped_tracks,
+                                current_mapped_ratio,
+                                current_outlier_tracks,
+                                current_visual_factor_tracks,
+                                current_visual_factor_ratio,
+                                current_reprojection_count,
+                                current_reprojection_rmse_px,
+                                map->frame_num(),
+                                window_subframes,
+                                map->track_num(),
+                                window_mapped_tracks,
+                                window_outlier_tracks,
+                                window_trash_tracks,
+                                current_speed_mps,
+                                representative
+                                    .translation_delta_m,
+                                representative
+                                    .rotation_delta_deg,
+                                fixed_world_factor_count,
+                                pnp_seed_rmse_px,
+                                recovery_rmse_px,
+                                seed_delta_authoritative_t,
+                                seed_delta_authoritative_r,
+                                recovery_delta_authoritative_t,
+                                recovery_delta_authoritative_r,
+                                recovery_delta_seed_t,
+                                recovery_delta_seed_r,
+                                recovery_usable ? 1 : 0,
+                                candidate_finite ? 1 : 0,
+                                raw_rmse_improved ? 1 : 0,
+                                acceptance_candidate ? 1 : 0,
+                                acceptance_reason);
+                            std::fclose(event_csv);
+
+                            std::fprintf(
+                                stderr,
+                                "[PlaceRecoveryEventCsv] "
+                                "path=%s current=%zu "
+                                "event_id=%zu wrote=1 "
+                                "diagnostic_only=1 "
+                                "state_mutation=0\n",
+                                event_csv_path,
+                                frame->id(),
+                                group.event_id);
+                        }
+                    }
 
                     if (acceptance_candidate) {
                         const PoseState live_body_pose_after_shadow =
@@ -3509,238 +4530,15 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
                                     coherent_dry_run_ready ? 1 : 0,
                                     live_rebased_prior_ready ? 1 : 0);
                             } else {
-                                // 0110p: evaluate the rolling-cancellation
-                                // policy before the first estimator write.
-                                // The temporary history is committed-history
-                                // plus the current proposal. A suppressed
-                                // proposal is never inserted into the actual
-                                // committed-history window.
-                                constexpr double
-                                    live_policy_window_s = 5.0;
-                                constexpr size_t
-                                    live_policy_min_commits = 3;
-                                constexpr double
-                                    live_policy_max_translation_efficiency =
-                                        0.25;
-                                constexpr double
-                                    live_policy_max_yaw_efficiency = 0.25;
+                                MarginalizationFactor
+                                    *prepared_live_prior =
+                                        live_rebased_prior.get();
 
-                                std::vector<
-                                    PlaceRecoveryCommitCancellationState>
-                                    live_policy_history =
-                                        recent_place_recovery_commits_;
-                                PlaceRecoveryCommitCancellationState
-                                    live_policy_current;
-                                live_policy_current.event_id =
-                                    group.event_id;
-                                live_policy_current.current_frame_id =
-                                    frame->id();
-                                live_policy_current.timestamp =
-                                    frame->image->t;
-                                live_policy_current.target_translation_m =
-                                    commit_delta_t;
-                                live_policy_current.world_yaw_rad =
-                                    coherent_yaw_rad;
-                                live_policy_current.world_translation =
-                                    coherent_translation;
-                                live_policy_history.emplace_back(
-                                    live_policy_current);
-
-                                const double live_policy_window_start =
-                                    frame->image->t -
-                                    live_policy_window_s;
-                                live_policy_history.erase(
-                                    std::remove_if(
-                                        live_policy_history.begin(),
-                                        live_policy_history.end(),
-                                        [live_policy_window_start](
-                                            const PlaceRecoveryCommitCancellationState
-                                                &entry) {
-                                            return entry.timestamp <
-                                                live_policy_window_start;
-                                        }),
-                                    live_policy_history.end());
-
-                                double live_policy_path_world_t = 0.0;
-                                double live_policy_path_abs_yaw = 0.0;
-                                quaternion live_policy_net_q =
-                                    quaternion::Identity();
-                                vector<3> live_policy_net_p =
-                                    vector<3>::Zero();
-
-                                for (const auto &entry :
-                                     live_policy_history) {
-                                    quaternion entry_q;
-                                    entry_q =
-                                        Eigen::AngleAxisd(
-                                            entry.world_yaw_rad,
-                                            Eigen::Vector3d::UnitZ());
-                                    entry_q.normalize();
-
-                                    live_policy_net_p =
-                                        entry_q *
-                                            live_policy_net_p +
-                                        entry.world_translation;
-                                    live_policy_net_q =
-                                        entry_q *
-                                        live_policy_net_q;
-                                    live_policy_net_q.normalize();
-
-                                    live_policy_path_world_t +=
-                                        entry.world_translation.norm();
-                                    live_policy_path_abs_yaw +=
-                                        std::abs(entry.world_yaw_rad);
-                                }
-
-                                const matrix<3> live_policy_net_R =
-                                    live_policy_net_q.matrix();
-                                const double live_policy_net_yaw =
-                                    std::atan2(
-                                        live_policy_net_R(1, 0),
-                                        live_policy_net_R(0, 0));
-                                const double live_policy_net_t =
-                                    live_policy_net_p.norm();
-                                const double
-                                    live_policy_translation_efficiency =
-                                        live_policy_path_world_t >
-                                                1.0e-12
-                                            ? live_policy_net_t /
-                                                  live_policy_path_world_t
-                                            : std::numeric_limits<double>::
-                                                  quiet_NaN();
-                                const double live_policy_yaw_efficiency =
-                                    live_policy_path_abs_yaw >
-                                            1.0e-12
-                                        ? std::abs(
-                                              live_policy_net_yaw) /
-                                              live_policy_path_abs_yaw
-                                        : std::numeric_limits<double>::
-                                              quiet_NaN();
-                                const double live_policy_span_s =
-                                    live_policy_history.size() >= 2
-                                        ? frame->image->t -
-                                              live_policy_history.front()
-                                                  .timestamp
-                                        : 0.0;
-
-                                const bool live_policy_count_met =
-                                    live_policy_history.size() >=
-                                    live_policy_min_commits;
-                                const bool live_policy_translation_met =
-                                    std::isfinite(
-                                        live_policy_translation_efficiency) &&
-                                    live_policy_translation_efficiency <=
-                                        live_policy_max_translation_efficiency;
-                                const bool live_policy_yaw_met =
-                                    std::isfinite(
-                                        live_policy_yaw_efficiency) &&
-                                    live_policy_yaw_efficiency <=
-                                        live_policy_max_yaw_efficiency;
-                                const bool live_policy_would_suppress =
-                                    live_policy_count_met &&
-                                    live_policy_translation_met &&
-                                    live_policy_yaw_met;
-                                const bool live_suppression_enabled =
-                                    place_recovery_churn_suppression_enabled();
-                                const bool live_suppress =
-                                    live_suppression_enabled &&
-                                    live_policy_would_suppress;
-
-                                std::fprintf(
-                                    stderr,
-                                    "[PlaceRecoveryChurnSuppression] "
-                                    "current=%zu t=%.9f event_id=%zu "
-                                    "suppression_enabled=%d "
-                                    "window_s=%.3f "
-                                    "committed_history_before=%zu "
-                                    "proposed_window_commit_count=%zu "
-                                    "proposed_window_span_s=%.9f "
-                                    "min_commits=%zu "
-                                    "max_world_translation_efficiency=%.6f "
-                                    "max_yaw_efficiency=%.6f "
-                                    "world_translation_efficiency=%.9f "
-                                    "yaw_efficiency=%.9f "
-                                    "count_condition=%d "
-                                    "translation_condition=%d "
-                                    "yaw_condition=%d "
-                                    "would_suppress=%d "
-                                    "action=%s "
-                                    "actual_commit_applied=%d "
-                                    "committed_history_updated=%d "
-                                    "prior_replaced_if_suppressed=0 "
-                                    "reconciliation_created_if_suppressed=0 "
-                                    "acceptance_gate_changed=0 "
-                                    "commit_gate_enabled=%d\n",
-                                    frame->id(),
-                                    frame->image->t,
-                                    group.event_id,
-                                    live_suppression_enabled ? 1 : 0,
-                                    live_policy_window_s,
-                                    recent_place_recovery_commits_.size(),
-                                    live_policy_history.size(),
-                                    live_policy_span_s,
-                                    live_policy_min_commits,
-                                    live_policy_max_translation_efficiency,
-                                    live_policy_max_yaw_efficiency,
-                                    live_policy_translation_efficiency,
-                                    live_policy_yaw_efficiency,
-                                    live_policy_count_met ? 1 : 0,
-                                    live_policy_translation_met ? 1 : 0,
-                                    live_policy_yaw_met ? 1 : 0,
-                                    live_policy_would_suppress ? 1 : 0,
-                                    live_suppress
-                                        ? "suppressed"
-                                        : live_suppression_enabled
-                                            ? "allowed"
-                                            : "shadow_only",
-                                    live_suppress ? 0 : 1,
-                                    live_suppress ? 0 : 1,
-                                    live_suppression_enabled ? 1 : 0);
-
-                                if (live_suppress) {
-                                    std::fprintf(
-                                        stderr,
-                                        "[PlaceRecoveryCommit] "
-                                        "current=%zu t=%.9f event_id=%zu "
-                                        "commit_scope=active_window_gauge "
-                                        "gravity_policy=yaw_translation "
-                                        "velocity_transform=world_yaw "
-                                        "bias_transform=unchanged "
-                                        "inverse_depth_transform=unchanged "
-                                        "commit_enabled=1 "
-                                        "commit_preconditions_met=1 "
-                                        "commit_policy_allowed=0 "
-                                        "reason=churn_suppressed "
-                                        "coherent_dry_run_ready=1 "
-                                        "live_rebased_prior_ready=1 "
-                                        "suppression_enabled=1 "
-                                        "would_suppress=1 "
-                                        "proposed_window_commit_count=%zu "
-                                        "world_translation_efficiency=%.9f "
-                                        "yaw_efficiency=%.9f "
-                                        "prior_replaced=0 "
-                                        "committed_history_updated=0 "
-                                        "reconciliation_state_created=0 "
-                                        "estimator_reset=0 "
-                                        "loop_constraint=0 "
-                                        "commit_applied=0 "
-                                        "state_mutation=0\n",
-                                        frame->id(),
-                                        frame->image->t,
-                                        group.event_id,
-                                        live_policy_history.size(),
-                                        live_policy_translation_efficiency,
-                                        live_policy_yaw_efficiency);
-                                } else {
-                                    MarginalizationFactor
-                                        *prepared_live_prior =
-                                            live_rebased_prior.get();
-
-                                    double max_applied_pose_t = 0.0;
-                                    double max_applied_pose_r_deg = 0.0;
-                                    double max_applied_v_delta = 0.0;
-                                    double max_applied_bg_delta = 0.0;
-                                    double max_applied_ba_delta = 0.0;
+                                double max_applied_pose_t = 0.0;
+                                double max_applied_pose_r_deg = 0.0;
+                                double max_applied_v_delta = 0.0;
+                                double max_applied_bg_delta = 0.0;
+                                double max_applied_ba_delta = 0.0;
                                 for (const auto &snapshot :
                                      coherent_states) {
                                     max_applied_pose_t =
@@ -4508,7 +5306,6 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
                                 active_place_recovery_commit_reconciliations_
                                     .emplace_back(
                                         std::move(reconciliation));
-                                }
                             }
                         }
                     }

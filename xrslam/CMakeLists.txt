@@ -82,6 +82,7 @@ set(PRIVATE_SOURCES
   ${XRSLAM_SOURCE_DIR}/xrslam/core/feature_tracker.cpp
   ${XRSLAM_SOURCE_DIR}/xrslam/core/frontend_worker.cpp
   ${XRSLAM_SOURCE_DIR}/xrslam/core/initializer.cpp
+  ${XRSLAM_SOURCE_DIR}/xrslam/core/place_graph_4dof_shadow.cpp
   ${XRSLAM_SOURCE_DIR}/xrslam/core/sliding_window_tracker.cpp
   ${XRSLAM_SOURCE_DIR}/xrslam/estimation/preintegrator.cpp
   ${XRSLAM_SOURCE_DIR}/xrslam/estimation/solver.cpp
