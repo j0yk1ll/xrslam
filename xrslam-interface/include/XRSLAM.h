@@ -125,7 +125,9 @@ typedef enum XRSLAMResultType {
     XRSLAM_RESULT_DEBUG_LOGS,    /*!< debug logs. */
     XRSLAM_RESULT_VERSION,       /*!< version. */
     XRSLAM_RESULT_UNKNOWN,
-    XRSLAM_INFO_INTRINSICS
+    XRSLAM_INFO_INTRINSICS,
+    // Output-only 4-DoF place graph correction. Existing values unchanged.
+    XRSLAM_RESULT_GLOBAL_BODY_POSE
 } XRSLAMResultType;
 
 /**

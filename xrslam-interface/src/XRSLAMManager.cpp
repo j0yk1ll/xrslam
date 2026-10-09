@@ -1,5 +1,6 @@
 #include "XRSLAMManager.h"
 
+#include <xrslam/core/place_graph_4dof_shadow.h>
 #include <xrslam/place_recognition.h>
 #include <xrslam/extra/orb_local_descriptor_extractor.h>
 
@@ -12,6 +13,7 @@
 #endif
 
 #include <cstdlib>
+#include <cmath>
 #include <stdexcept>
 
 #define XRSLAM_VERSION "0.1.0"
@@ -296,6 +298,44 @@ void XRSLAMManager::GetResultBodyPose(XRSLAMPose *pose) const {
     pose->quaternion[1] = body_pose.q.y();
     pose->quaternion[2] = body_pose.q.z();
     pose->quaternion[3] = body_pose.q.w();
+}
+
+void XRSLAMManager::GetResultGlobalBodyPose(XRSLAMPose *pose) const {
+    // Copy the existing body output; never mutate the estimator/local result.
+    GetResultBodyPose(pose);
+    PlaceGraph4DoFCorrection correction;
+    if (pose->timestamp <= 0.0 ||
+        !detail_->get_latest_global_correction(correction) ||
+        pose->timestamp < correction.timestamp ||
+        !std::isfinite(correction.yaw_deg) ||
+        !correction.translation.allFinite()) {
+        return;
+    }
+
+    const vector<3> local_p(
+        pose->translation[0], pose->translation[1], pose->translation[2]);
+    const quaternion local_q(
+        pose->quaternion[3], pose->quaternion[0],
+        pose->quaternion[1], pose->quaternion[2]);
+    if (!local_p.allFinite() || !local_q.coeffs().allFinite() ||
+        local_q.squaredNorm() < 1.0e-20) {
+        return;
+    }
+
+    constexpr double radians_per_degree =
+        3.14159265358979323846 / 180.0;
+    const quaternion drift_q(Eigen::AngleAxisd(
+        correction.yaw_deg * radians_per_degree,
+        Eigen::Vector3d::UnitZ()));
+    const vector<3> global_p = drift_q * local_p + correction.translation;
+    const quaternion global_q = (drift_q * local_q).normalized();
+    pose->translation[0] = global_p.x();
+    pose->translation[1] = global_p.y();
+    pose->translation[2] = global_p.z();
+    pose->quaternion[0] = global_q.x();
+    pose->quaternion[1] = global_q.y();
+    pose->quaternion[2] = global_q.z();
+    pose->quaternion[3] = global_q.w();
 }
 
 void XRSLAMManager::GetResultCameraPose(XRSLAMPose *pose) const {

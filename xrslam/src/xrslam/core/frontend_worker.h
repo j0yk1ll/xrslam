@@ -1,6 +1,7 @@
 #ifndef XRSLAM_FRONTEND_WORKER_H
 #define XRSLAM_FRONTEND_WORKER_H
 #include <xrslam/common.h>
+#include <xrslam/core/place_graph_4dof_shadow.h>
 #include <xrslam/estimation/state.h>
 #include <xrslam/utility/worker.h>
 
@@ -26,6 +27,10 @@ class FrontendWorker : public Worker {
     OutputObject get_virtual_object_pose_by_id(size_t id);
 
     std::tuple<double, size_t, PoseState, MotionState> get_latest_state() const;
+    // Copies the latest usable graph correction under latest_state_mutex.
+    // Returns false before any solve and after tracking reinitialization.
+    bool get_latest_global_correction(
+        PlaceGraph4DoFCorrection &correction) const;
     SysState get_system_state() const;
 
     bool global_localization_state() const;
@@ -44,6 +49,8 @@ class FrontendWorker : public Worker {
 
     std::tuple<double, size_t, PoseState, MotionState> latest_state;
     mutable std::mutex latest_state_mutex;
+    PlaceGraph4DoFCorrection global_drift_snapshot_;
+    bool global_drift_available_ = false;
 
     bool global_localization_flag = false;
 };

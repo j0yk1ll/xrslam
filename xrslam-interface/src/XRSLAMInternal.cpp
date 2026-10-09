@@ -93,6 +93,10 @@ void XRSLAMGetResult(XRSLAMResultType result_type, // result type
         xrslam::XRSLAMManager::Instance().GetResultBodyPose(
             static_cast<XRSLAMPose *>(result_data));
         break;
+    case XRSLAM_RESULT_GLOBAL_BODY_POSE:
+        xrslam::XRSLAMManager::Instance().GetResultGlobalBodyPose(
+            static_cast<XRSLAMPose *>(result_data));
+        break;
     case XRSLAM_RESULT_CAMERA_POSE:
         xrslam::XRSLAMManager::Instance().GetResultCameraPose(
             static_cast<XRSLAMPose *>(result_data));

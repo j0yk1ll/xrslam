@@ -71,6 +71,9 @@ int main(int argc, char *argv[]) {
     program.add_argument("-lc", "--license").help("License file.").nargs(1);
     program.add_argument("--csv").help("Save CSV-format trajectory.").nargs(1);
     program.add_argument("--tum").help("Save TUM-format trajectory.").nargs(1);
+    program.add_argument("--global-tum")
+        .help("Save causal graph-corrected body poses to a separate TUM file.")
+        .nargs(1);
     program.add_argument("-p", "--play")
         .help("Start playing immediately.")
         .default_value(false)
@@ -91,6 +94,8 @@ int main(int argc, char *argv[]) {
     std::string license_path = program.get<std::string>("-lc");
     std::string csv_output = program.get<std::string>("--csv");
     std::string tum_output = program.get<std::string>("--tum");
+    std::string global_tum_output =
+        program.get<std::string>("--global-tum");
     headless = program.get<bool>("--headless");
     bool isRunning = program.get<bool>("-p") || headless;
 
@@ -127,6 +132,11 @@ int main(int argc, char *argv[]) {
     }
     if (tum_output.length() > 0) {
         outputs.emplace_back(std::make_unique<TumTrajectoryWriter>(tum_output));
+    }
+    std::unique_ptr<TrajectoryWriter> global_output;
+    if (!global_tum_output.empty()) {
+        global_output =
+            std::make_unique<TumTrajectoryWriter>(global_tum_output);
     }
 
     std::unique_ptr<DatasetReader> reader =
@@ -238,6 +248,16 @@ int main(int argc, char *argv[]) {
                     if (pose_b.timestamp > 0) {
                         for (auto &output : outputs) {
                             output->write_pose(pose_b.timestamp, pose_b);
+                        }
+                        if (global_output) {
+                            XRSLAMPose global_pose_b;
+                            XRSLAMGetResult(
+                                XRSLAM_RESULT_GLOBAL_BODY_POSE,
+                                &global_pose_b);
+                            if (global_pose_b.timestamp == pose_b.timestamp) {
+                                global_output->write_pose(
+                                    global_pose_b.timestamp, global_pose_b);
+                            }
                         }
                     }
                 }

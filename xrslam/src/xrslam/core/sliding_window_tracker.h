@@ -48,6 +48,15 @@ class SlidingWindowTracker {
 
     bool track();
 
+    // Same-worker-thread access only; FrontendWorker publishes a locked copy.
+    bool get_latest_global_correction(
+        PlaceGraph4DoFCorrection &correction) const {
+        if (!latest_global_correction_available_)
+            return false;
+        correction = latest_global_correction_;
+        return true;
+    }
+
     std::tuple<double, PoseState, MotionState> get_latest_state() const;
 
     double m_th;
@@ -110,6 +119,8 @@ class SlidingWindowTracker {
     KeyframeArchive keyframe_archive_;
     PlaceKeyframeStore place_keyframes_;
     std::vector<PlaceGraph4DoFEdge> place_graph_4dof_edges_;
+    bool latest_global_correction_available_ = false;
+    PlaceGraph4DoFCorrection latest_global_correction_;
     std::vector<PendingPlaceRetrieval>
         pending_place_retrieval_candidates_;
     size_t previous_verified_current_frame_id_ =

@@ -1,4 +1,5 @@
 #include <iostream>
+#include <cstdio>
 #include <xrslam/common.h>
 #include <xrslam/core/detail.h>
 #include <xrslam/core/feature_tracker.h>
@@ -53,6 +54,7 @@ void FrontendWorker::work(std::unique_lock<std::mutex> &l) {
             std::unique_lock lk(latest_state_mutex);
             auto [t, pose, motion] = sliding_window_tracker->get_latest_state();
             latest_state = {t, pending_frame_id, pose, motion};
+            global_drift_available_ = false;
             lk.unlock();
             initializer.reset();
         }
@@ -74,10 +76,33 @@ void FrontendWorker::work(std::unique_lock<std::mutex> &l) {
             std::unique_lock lk(latest_state_mutex);
             auto [t, pose, motion] = sliding_window_tracker->get_latest_state();
             latest_state = {t, pending_frame_id, pose, motion};
+            PlaceGraph4DoFCorrection correction;
+            if (sliding_window_tracker->get_latest_global_correction(
+                    correction)) {
+                const bool new_snapshot =
+                    !global_drift_available_ ||
+                    global_drift_snapshot_.frame_id != correction.frame_id;
+                global_drift_snapshot_ = correction;
+                global_drift_available_ = true;
+                if (new_snapshot) {
+                    std::fprintf(
+                        stderr,
+                        "[PlaceGlobalDriftSnapshotShadow] "
+                        "frame_id=%zu t=%.9f "
+                        "yaw_correction_deg=%.9f "
+                        "translation=%.9f,%.9f,%.9f "
+                        "state_mutation=0\n",
+                        correction.frame_id, correction.timestamp,
+                        correction.yaw_deg, correction.translation.x(),
+                        correction.translation.y(),
+                        correction.translation.z());
+                }
+            }
             lk.unlock();
         } else {
             std::unique_lock lk(latest_state_mutex);
             latest_state = {{}, nil(), {}, {}};
+            global_drift_available_ = false;
             lk.unlock();
             initializer = std::make_unique<Initializer>(config);
             sliding_window_tracker.reset();
@@ -95,6 +120,15 @@ std::tuple<double, size_t, PoseState, MotionState>
 FrontendWorker::get_latest_state() const {
     std::unique_lock lk(latest_state_mutex);
     return latest_state;
+}
+
+bool FrontendWorker::get_latest_global_correction(
+    PlaceGraph4DoFCorrection &correction) const {
+    std::unique_lock lk(latest_state_mutex);
+    if (!global_drift_available_)
+        return false;
+    correction = global_drift_snapshot_;
+    return true;
 }
 
 size_t FrontendWorker::create_virtual_object() {

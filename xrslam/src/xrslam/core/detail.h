@@ -16,6 +16,7 @@ class LocalDescriptorExtractor;
 class PlaceDescriptorExtractor;
 class PlaceDatabase;
 class Synchronizer;
+struct PlaceGraph4DoFCorrection;
 
 struct XRSLAM::Detail {
     struct GyroscopeData {
@@ -52,6 +53,9 @@ struct XRSLAM::Detail {
 
     std::tuple<double, Pose> get_latest_state() const;
     std::tuple<double, Pose> get_latest_pose();
+    // Returns a coherent graph correction snapshot, if available.
+    bool get_latest_global_correction(
+        PlaceGraph4DoFCorrection &correction) const;
 
     std::unique_ptr<FeatureTracker> feature_tracker;
     std::unique_ptr<FrontendWorker> frontend;

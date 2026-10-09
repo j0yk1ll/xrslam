@@ -3063,6 +3063,14 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
                                 *current_correction =
                                     graph_result.find_correction(
                                         frame->id());
+                            // Output-only candidate. No VIO or graph state is
+                            // modified; rejected/unusable solves do not replace
+                            // the previous valid drift correction.
+                            if (graph_result.usable && current_correction) {
+                                latest_global_correction_ =
+                                    *current_correction;
+                                latest_global_correction_available_ = true;
+                            }
                             const double graph_nan =
                                 std::numeric_limits<double>::quiet_NaN();
                             const double current_yaw_correction_deg =
