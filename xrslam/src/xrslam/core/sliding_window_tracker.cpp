@@ -45,6 +45,12 @@ bool place_recovery_commit_enabled() {
     return value && std::string(value) == "1";
 }
 
+bool place_recovery_churn_suppression_enabled() {
+    const char *value =
+        std::getenv("XRSLAM_PLACE_RECOVERY_CHURN_SUPPRESSION");
+    return value && std::string(value) == "1";
+}
+
 bool place_recovery_factor_shadow_enabled() {
     const char *value =
         std::getenv("XRSLAM_PLACE_RECOVERY_FACTOR_SHADOW");
@@ -3503,15 +3509,238 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
                                     coherent_dry_run_ready ? 1 : 0,
                                     live_rebased_prior_ready ? 1 : 0);
                             } else {
-                                MarginalizationFactor
-                                    *prepared_live_prior =
-                                        live_rebased_prior.get();
+                                // 0110p: evaluate the rolling-cancellation
+                                // policy before the first estimator write.
+                                // The temporary history is committed-history
+                                // plus the current proposal. A suppressed
+                                // proposal is never inserted into the actual
+                                // committed-history window.
+                                constexpr double
+                                    live_policy_window_s = 5.0;
+                                constexpr size_t
+                                    live_policy_min_commits = 3;
+                                constexpr double
+                                    live_policy_max_translation_efficiency =
+                                        0.25;
+                                constexpr double
+                                    live_policy_max_yaw_efficiency = 0.25;
 
-                                double max_applied_pose_t = 0.0;
-                                double max_applied_pose_r_deg = 0.0;
-                                double max_applied_v_delta = 0.0;
-                                double max_applied_bg_delta = 0.0;
-                                double max_applied_ba_delta = 0.0;
+                                std::vector<
+                                    PlaceRecoveryCommitCancellationState>
+                                    live_policy_history =
+                                        recent_place_recovery_commits_;
+                                PlaceRecoveryCommitCancellationState
+                                    live_policy_current;
+                                live_policy_current.event_id =
+                                    group.event_id;
+                                live_policy_current.current_frame_id =
+                                    frame->id();
+                                live_policy_current.timestamp =
+                                    frame->image->t;
+                                live_policy_current.target_translation_m =
+                                    commit_delta_t;
+                                live_policy_current.world_yaw_rad =
+                                    coherent_yaw_rad;
+                                live_policy_current.world_translation =
+                                    coherent_translation;
+                                live_policy_history.emplace_back(
+                                    live_policy_current);
+
+                                const double live_policy_window_start =
+                                    frame->image->t -
+                                    live_policy_window_s;
+                                live_policy_history.erase(
+                                    std::remove_if(
+                                        live_policy_history.begin(),
+                                        live_policy_history.end(),
+                                        [live_policy_window_start](
+                                            const PlaceRecoveryCommitCancellationState
+                                                &entry) {
+                                            return entry.timestamp <
+                                                live_policy_window_start;
+                                        }),
+                                    live_policy_history.end());
+
+                                double live_policy_path_world_t = 0.0;
+                                double live_policy_path_abs_yaw = 0.0;
+                                quaternion live_policy_net_q =
+                                    quaternion::Identity();
+                                vector<3> live_policy_net_p =
+                                    vector<3>::Zero();
+
+                                for (const auto &entry :
+                                     live_policy_history) {
+                                    quaternion entry_q;
+                                    entry_q =
+                                        Eigen::AngleAxisd(
+                                            entry.world_yaw_rad,
+                                            Eigen::Vector3d::UnitZ());
+                                    entry_q.normalize();
+
+                                    live_policy_net_p =
+                                        entry_q *
+                                            live_policy_net_p +
+                                        entry.world_translation;
+                                    live_policy_net_q =
+                                        entry_q *
+                                        live_policy_net_q;
+                                    live_policy_net_q.normalize();
+
+                                    live_policy_path_world_t +=
+                                        entry.world_translation.norm();
+                                    live_policy_path_abs_yaw +=
+                                        std::abs(entry.world_yaw_rad);
+                                }
+
+                                const matrix<3> live_policy_net_R =
+                                    live_policy_net_q.matrix();
+                                const double live_policy_net_yaw =
+                                    std::atan2(
+                                        live_policy_net_R(1, 0),
+                                        live_policy_net_R(0, 0));
+                                const double live_policy_net_t =
+                                    live_policy_net_p.norm();
+                                const double
+                                    live_policy_translation_efficiency =
+                                        live_policy_path_world_t >
+                                                1.0e-12
+                                            ? live_policy_net_t /
+                                                  live_policy_path_world_t
+                                            : std::numeric_limits<double>::
+                                                  quiet_NaN();
+                                const double live_policy_yaw_efficiency =
+                                    live_policy_path_abs_yaw >
+                                            1.0e-12
+                                        ? std::abs(
+                                              live_policy_net_yaw) /
+                                              live_policy_path_abs_yaw
+                                        : std::numeric_limits<double>::
+                                              quiet_NaN();
+                                const double live_policy_span_s =
+                                    live_policy_history.size() >= 2
+                                        ? frame->image->t -
+                                              live_policy_history.front()
+                                                  .timestamp
+                                        : 0.0;
+
+                                const bool live_policy_count_met =
+                                    live_policy_history.size() >=
+                                    live_policy_min_commits;
+                                const bool live_policy_translation_met =
+                                    std::isfinite(
+                                        live_policy_translation_efficiency) &&
+                                    live_policy_translation_efficiency <=
+                                        live_policy_max_translation_efficiency;
+                                const bool live_policy_yaw_met =
+                                    std::isfinite(
+                                        live_policy_yaw_efficiency) &&
+                                    live_policy_yaw_efficiency <=
+                                        live_policy_max_yaw_efficiency;
+                                const bool live_policy_would_suppress =
+                                    live_policy_count_met &&
+                                    live_policy_translation_met &&
+                                    live_policy_yaw_met;
+                                const bool live_suppression_enabled =
+                                    place_recovery_churn_suppression_enabled();
+                                const bool live_suppress =
+                                    live_suppression_enabled &&
+                                    live_policy_would_suppress;
+
+                                std::fprintf(
+                                    stderr,
+                                    "[PlaceRecoveryChurnSuppression] "
+                                    "current=%zu t=%.9f event_id=%zu "
+                                    "suppression_enabled=%d "
+                                    "window_s=%.3f "
+                                    "committed_history_before=%zu "
+                                    "proposed_window_commit_count=%zu "
+                                    "proposed_window_span_s=%.9f "
+                                    "min_commits=%zu "
+                                    "max_world_translation_efficiency=%.6f "
+                                    "max_yaw_efficiency=%.6f "
+                                    "world_translation_efficiency=%.9f "
+                                    "yaw_efficiency=%.9f "
+                                    "count_condition=%d "
+                                    "translation_condition=%d "
+                                    "yaw_condition=%d "
+                                    "would_suppress=%d "
+                                    "action=%s "
+                                    "actual_commit_applied=%d "
+                                    "committed_history_updated=%d "
+                                    "prior_replaced_if_suppressed=0 "
+                                    "reconciliation_created_if_suppressed=0 "
+                                    "acceptance_gate_changed=0 "
+                                    "commit_gate_enabled=%d\n",
+                                    frame->id(),
+                                    frame->image->t,
+                                    group.event_id,
+                                    live_suppression_enabled ? 1 : 0,
+                                    live_policy_window_s,
+                                    recent_place_recovery_commits_.size(),
+                                    live_policy_history.size(),
+                                    live_policy_span_s,
+                                    live_policy_min_commits,
+                                    live_policy_max_translation_efficiency,
+                                    live_policy_max_yaw_efficiency,
+                                    live_policy_translation_efficiency,
+                                    live_policy_yaw_efficiency,
+                                    live_policy_count_met ? 1 : 0,
+                                    live_policy_translation_met ? 1 : 0,
+                                    live_policy_yaw_met ? 1 : 0,
+                                    live_policy_would_suppress ? 1 : 0,
+                                    live_suppress
+                                        ? "suppressed"
+                                        : live_suppression_enabled
+                                            ? "allowed"
+                                            : "shadow_only",
+                                    live_suppress ? 0 : 1,
+                                    live_suppress ? 0 : 1,
+                                    live_suppression_enabled ? 1 : 0);
+
+                                if (live_suppress) {
+                                    std::fprintf(
+                                        stderr,
+                                        "[PlaceRecoveryCommit] "
+                                        "current=%zu t=%.9f event_id=%zu "
+                                        "commit_scope=active_window_gauge "
+                                        "gravity_policy=yaw_translation "
+                                        "velocity_transform=world_yaw "
+                                        "bias_transform=unchanged "
+                                        "inverse_depth_transform=unchanged "
+                                        "commit_enabled=1 "
+                                        "commit_preconditions_met=1 "
+                                        "commit_policy_allowed=0 "
+                                        "reason=churn_suppressed "
+                                        "coherent_dry_run_ready=1 "
+                                        "live_rebased_prior_ready=1 "
+                                        "suppression_enabled=1 "
+                                        "would_suppress=1 "
+                                        "proposed_window_commit_count=%zu "
+                                        "world_translation_efficiency=%.9f "
+                                        "yaw_efficiency=%.9f "
+                                        "prior_replaced=0 "
+                                        "committed_history_updated=0 "
+                                        "reconciliation_state_created=0 "
+                                        "estimator_reset=0 "
+                                        "loop_constraint=0 "
+                                        "commit_applied=0 "
+                                        "state_mutation=0\n",
+                                        frame->id(),
+                                        frame->image->t,
+                                        group.event_id,
+                                        live_policy_history.size(),
+                                        live_policy_translation_efficiency,
+                                        live_policy_yaw_efficiency);
+                                } else {
+                                    MarginalizationFactor
+                                        *prepared_live_prior =
+                                            live_rebased_prior.get();
+
+                                    double max_applied_pose_t = 0.0;
+                                    double max_applied_pose_r_deg = 0.0;
+                                    double max_applied_v_delta = 0.0;
+                                    double max_applied_bg_delta = 0.0;
+                                    double max_applied_ba_delta = 0.0;
                                 for (const auto &snapshot :
                                      coherent_states) {
                                     max_applied_pose_t =
@@ -4279,6 +4508,7 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
                                 active_place_recovery_commit_reconciliations_
                                     .emplace_back(
                                         std::move(reconciliation));
+                                }
                             }
                         }
                     }
