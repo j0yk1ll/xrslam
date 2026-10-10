@@ -4,6 +4,7 @@
 #include <xrslam/common.h>
 #include <xrslam/core/keyframe_archive.h>
 #include <xrslam/core/place_graph_4dof_shadow.h>
+#include <xrslam/core/persistent_relocalization_map.h>
 #include <xrslam/estimation/state.h>
 #include <xrslam/place_recognition.h>
 
@@ -55,6 +56,15 @@ class SlidingWindowTracker {
             return false;
         correction = latest_global_correction_;
         return true;
+    }
+
+    // Transfer value-owned, session-local reference records before this
+    // tracker is destroyed. Only called on the frontend worker thread.
+    RelocalizationReferenceSession take_relocalization_reference() {
+        RelocalizationReferenceSession session;
+        session.archive = std::move(keyframe_archive_);
+        session.places = std::move(place_keyframes_);
+        return session;
     }
 
     std::tuple<double, PoseState, MotionState> get_latest_state() const;
