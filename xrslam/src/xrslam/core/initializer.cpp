@@ -13,17 +13,7 @@
 #include <xrslam/map/track.h>
 #include <xrslam/xrslam.h>
 
-#include <cstdio>
-#include <cstdlib>
-
 namespace xrslam {
-
-namespace {
-bool relocalization_init_trace_enabled() {
-    const char *value = std::getenv("XRSLAM_RELOCALIZATION_INIT_TRACE");
-    return value && value[0] == '1' && value[1] == '\0';
-}
-} // namespace
 
 Initializer::Initializer(std::shared_ptr<Config> config) : config(config) {}
 
@@ -40,12 +30,6 @@ void Initializer::mirror_keyframe_map(Map *feature_tracking_map,
     init_frame_id = nil();
 
     if (init_frame_index_last < init_frame_index_distance) {
-        if (relocalization_init_trace_enabled())
-            std::fprintf(stderr,
-                "[RelocalizationInitTrace] stage=mirror result=not_ready "
-                "available_frames=%zu required_gap=%zu\n",
-                feature_tracking_map->frame_num(),
-                init_frame_index_distance);
         map.reset();
         return;
     }
@@ -92,32 +76,12 @@ void Initializer::mirror_keyframe_map(Map *feature_tracking_map,
 }
 
 std::unique_ptr<SlidingWindowTracker> Initializer::initialize() {
-    if (!map) {
-        if (relocalization_init_trace_enabled())
-            std::fprintf(stderr,
-                "[RelocalizationInitTrace] stage=initialize "
-                "result=fail reason=no_keyframe_map\n");
+    if (!map)
         return nullptr;
-    }
-    const size_t last_frame_id = map->get_frame(map->frame_num() - 1)->id();
-    if (!init_sfm()) {
-        if (relocalization_init_trace_enabled())
-            std::fprintf(stderr,
-                "[RelocalizationInitTrace] stage=initialize "
-                "current=%zu result=fail reason=sfm\n", last_frame_id);
+    if (!init_sfm())
         return nullptr;
-    }
-    if (!init_imu()) {
-        if (relocalization_init_trace_enabled())
-            std::fprintf(stderr,
-                "[RelocalizationInitTrace] stage=initialize "
-                "current=%zu result=fail reason=imu\n", last_frame_id);
+    if (!init_imu())
         return nullptr;
-    }
-    if (relocalization_init_trace_enabled())
-        std::fprintf(stderr,
-            "[RelocalizationInitTrace] stage=initialize "
-            "current=%zu result=pass\n", last_frame_id);
 
     if (!config->has_imu()) {
         for (size_t i = 0; i < map->frame_num(); ++i) {
@@ -234,18 +198,9 @@ bool Initializer::init_sfm() {
         common_track_num++;
     }
 
-    total_parallax /= std::max(common_track_num, 1);
-    if (relocalization_init_trace_enabled())
-        std::fprintf(stderr,
-            "[RelocalizationInitTrace] stage=sfm_correspondences "
-            "first=%zu current=%zu matches=%d required_matches=%zu "
-            "mean_parallax_px=%.6f required_parallax_px=%.6f\n",
-            init_frame_i->id(), init_frame_j->id(), common_track_num,
-            static_cast<size_t>(config->initializer_min_matches()),
-            total_parallax,
-            static_cast<double>(config->initializer_min_parallax()));
     if (common_track_num < (int)config->initializer_min_matches())
         return false;
+    total_parallax /= std::max(common_track_num, 1);
     if (total_parallax < config->initializer_min_parallax())
         return false;
 
@@ -259,10 +214,6 @@ bool Initializer::init_sfm() {
                                          1000, config->random());
     if (!decompose_homography(H, RH1, RH2, TH1, TH2, nH1, nH2)) {
         log_debug("SfM init fail: pure rotation.");
-        if (relocalization_init_trace_enabled())
-            std::fprintf(stderr,
-                "[RelocalizationInitTrace] stage=sfm_geometry "
-                "result=fail reason=homography_decomposition\n");
         return false; // is pure rotation
     }
     TH1 = TH1.normalized();
@@ -336,13 +287,6 @@ bool Initializer::init_sfm() {
 
     if (triangulated_num < config->initializer_min_triangulation()) {
         log_debug("SfM init fail: triangulation (%zd).", triangulated_num);
-        if (relocalization_init_trace_enabled())
-            std::fprintf(stderr,
-                "[RelocalizationInitTrace] stage=sfm_geometry "
-                "result=fail reason=triangulation "
-                "triangulated=%zu required=%zu\n",
-                triangulated_num,
-                static_cast<size_t>(config->initializer_min_triangulation()));
         return false;
     }
 
@@ -458,10 +402,6 @@ bool Initializer::init_sfm() {
         }
     }
     if (!solver->solve()) {
-        if (relocalization_init_trace_enabled())
-            std::fprintf(stderr,
-                "[RelocalizationInitTrace] stage=sfm_geometry "
-                "result=fail reason=bundle_adjustment\n");
         return false;
     }
 
@@ -485,20 +425,12 @@ bool Initializer::init_imu() {
     reset_states();
     solve_gyro_bias();
     solve_gravity_scale_velocity();
-    if (relocalization_init_trace_enabled())
-        std::fprintf(stderr,
-            "[RelocalizationInitTrace] stage=imu_scale "
-            "phase=initial scale=%.9f\n", scale);
     if (scale < 0.001 || scale > 1.0)
         return false;
     if (!config->initializer_refine_imu()) {
         return apply_init();
     }
     refine_scale_velocity_via_gravity();
-    if (relocalization_init_trace_enabled())
-        std::fprintf(stderr,
-            "[RelocalizationInitTrace] stage=imu_scale "
-            "phase=refined scale=%.9f\n", scale);
     if (scale < 0.001 || scale > 1.0)
         return false;
     return apply_init();
@@ -674,14 +606,6 @@ bool Initializer::apply_init(bool apply_ba, bool apply_velocity) {
         }
     }
 
-    if (relocalization_init_trace_enabled())
-        std::fprintf(stderr,
-            "[RelocalizationInitTrace] stage=final_landmarks "
-            "triangulated=%zu required=%zu result=%s\n",
-            final_point_num,
-            static_cast<size_t>(config->initializer_min_landmarks()),
-            final_point_num >= config->initializer_min_landmarks()
-                ? "pass" : "fail");
     return final_point_num >= config->initializer_min_landmarks();
 }
 

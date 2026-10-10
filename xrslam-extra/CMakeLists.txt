@@ -16,14 +16,10 @@ endif()
 
 superbuild_depend(yaml-cpp)
 
-# XFeat is an optional experimental local-feature backend. Keep ONNX Runtime
-# completely optional so the default XRSLAM build has no learned-feature
-# dependency.
-if(NOT XRSLAM_IOS)
-  find_package(onnxruntime CONFIG QUIET)
-  if(XRSLAM_ENABLE_EIGENPLACES)
-    find_package(Torch CONFIG REQUIRED)
-  endif()
+# The supported learned place descriptor is EigenPlaces (LibTorch).
+# XFeat/LighterGlue/ONNX Runtime are not part of this build.
+if(NOT XRSLAM_IOS AND XRSLAM_ENABLE_EIGENPLACES)
+  find_package(Torch CONFIG REQUIRED)
 endif()
 
 set(XRSLAM_EXTRA_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -87,26 +83,6 @@ if(TARGET depends::yaml-cpp)
     PUBLIC
       xrslam-extra-common
       depends::yaml-cpp
-  )
-endif()
-
-set(XRSLAM_ONNXRUNTIME_TARGET "")
-if(TARGET onnxruntime::onnxruntime)
-  set(XRSLAM_ONNXRUNTIME_TARGET onnxruntime::onnxruntime)
-elseif(TARGET onnxruntime)
-  set(XRSLAM_ONNXRUNTIME_TARGET onnxruntime)
-endif()
-
-if(XRSLAM_ONNXRUNTIME_TARGET AND TARGET xrslam-extra-opencv-image)
-  add_library(xrslam-extra-xfeat
-    ${XRSLAM_EXTRA_INCLUDE_DIR}/xrslam/extra/xfeat_local_feature_backend.h
-    ${XRSLAM_EXTRA_SOURCE_DIR}/xrslam/extra/xfeat_local_feature_backend.cpp
-  )
-  target_link_libraries(xrslam-extra-xfeat
-    PUBLIC
-      xrslam-extra-opencv-image
-    PRIVATE
-      ${XRSLAM_ONNXRUNTIME_TARGET}
   )
 endif()
 

@@ -10,9 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
-#include <cstdlib>
 #include <exception>
-#include <string>
 #include <vector>
 
 namespace xrslam {
@@ -94,13 +92,6 @@ inline std::vector<RelocalizationPnPHypothesis> probe_relocalization_reference(
         size_t retained_candidates = 0;
         size_t verified_candidates = 0;
         std::vector<RelocalizationPnPHypothesis> verified_hypotheses;
-        // Test-only negative control: break the historical 2D-3D association
-        // after real retrieval and ORB matching, before geometric verification.
-        // It is completely inactive unless explicitly enabled for a replay.
-        const char *corrupt_env = std::getenv(
-            "XRSLAM_TEST_RELOCALIZATION_CORRUPT_PNP");
-        const bool corrupt_pnp = corrupt_env &&
-            std::string(corrupt_env) == "1";
         const matrix<3> K_inv = frame->K.inverse();
         if (!K_inv.allFinite()) return {};
 
@@ -150,34 +141,6 @@ inline std::vector<RelocalizationPnPHypothesis> probe_relocalization_reference(
                     old.observations[obs].track_id, world});
             }
             if (world_points.size() < 6) continue;
-            if (corrupt_pnp) {
-                // A rigid transformation of every 3D point would NOT be a
-                // valid negative test: PnP can absorb that into its camera
-                // pose. Instead permute which landmark belongs to each
-                // unchanged image feature. Preserve the geometry/metadata
-                // alignment so even an erroneously accepted hypothesis does
-                // not silently revert to the original correct landmarks.
-                const size_t shift = world_points.size() / 2;
-                std::rotate(world_points.begin(),
-                            world_points.begin() + shift,
-                            world_points.end());
-                const auto original_associated = associated;
-                for (size_t i = 0; i < associated.size(); ++i) {
-                    // Keep the CURRENT keypoint fixed, while assigning it a
-                    // different OLD landmark and its historical track ID.
-                    const size_t wrong_index =
-                        (i + shift) % associated.size();
-                    associated[i].world_point = world_points[i];
-                    associated[i].original_track_id =
-                        original_associated[wrong_index].original_track_id;
-                }
-                std::fprintf(stderr,
-                    "[RelocalizationFalseMatchTest] event=corrupted "
-                    "current=%zu reference=%zu session=%zu "
-                    "correspondences=%zu state_mutation=0\n",
-                    frame->id(), old.frame_id, reference.session_id,
-                    world_points.size());
-            }
             std::vector<char> mask;
             const matrix<4> T_cw = find_pnp_matrix(
                 world_points, normalized_points, mask,

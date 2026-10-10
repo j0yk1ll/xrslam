@@ -259,40 +259,6 @@ void FrontendWorker::work(std::unique_lock<std::mutex> &l) {
                 detail->feature_tracker->map.get(), pending_frame_id);
         }
         bool tracking_ok = sliding_window_tracker->track();
-        // Opt-in passive health measurements. Do not infer a tracking failure
-        // from these preliminary thresholds or change the VIO lifecycle.
-        const char *health_shadow =
-            std::getenv("XRSLAM_RELOCALIZATION_HEALTH_SHADOW");
-        if (tracking_ok && health_shadow &&
-            std::string(health_shadow) == "1") {
-            Frame *current = sliding_window_tracker->map->get_frame(
-                sliding_window_tracker->map->frame_num() - 1);
-            if (!current->subframes.empty())
-                current = current->subframes.back().get();
-            const RelocalizationTrackingHealth health =
-                measure_relocalization_tracking_health(current);
-            const double inlier_fraction = health.reprojectable == 0 ? 0.0 :
-                static_cast<double>(health.inliers_6px) /
-                static_cast<double>(health.reprojectable);
-            // An indicator for offline calibration, never a reset decision.
-            const bool suspect = !health.pose_finite ||
-                health.mapped < 8 ||
-                (health.reprojectable >= 8 && inlier_fraction < 0.20);
-            std::fprintf(stderr,
-                "[RelocalizationHealthShadow] "
-                "frame=%zu t=%.9f stage=%s "
-                "keypoints=%zu associated=%zu mapped=%zu "
-                "reprojectable=%zu inliers3=%zu inliers6=%zu "
-                "inlier6_fraction=%.6f median_px=%.6f "
-                "pose_finite=%d suspect=%d state_mutation=0\n",
-                health.frame_id, health.timestamp,
-                relocalization_bootstrap_tracking_ ? "recovered" : "ordinary",
-                health.detected, health.associated, health.mapped,
-                health.reprojectable, health.inliers_3px,
-                health.inliers_6px, inlier_fraction,
-                health.median_reprojection_px,
-                health.pose_finite ? 1 : 0, suspect ? 1 : 0);
-        }
         // Experimental automatic-loss gate. The passive 0121g measurements
         // and criteria are unchanged. A persistent run enters the SAME
         // failure path as a normal tracker failure. This is opt-in because
@@ -341,28 +307,6 @@ void FrontendWorker::work(std::unique_lock<std::mutex> &l) {
             }
         } else {
             relocalization_auto_loss_gate_.reset();
-        }
-        // Controlled integration trigger. One shot per process, only after
-        // an earlier successful step published the correction to callers.
-        // A correction produced by THIS track() has not yet been published.
-        // Keep the test loss off that solve boundary so the history stores
-        // an actually published local-to-global transform.
-        const char *force_loss = std::getenv(
-            "XRSLAM_TEST_RELOCALIZATION_FORCE_LOSS_ONCE");
-        if (tracking_ok && !relocalization_loss_injected_ &&
-            force_loss && std::string(force_loss) == "1") {
-            PlaceGraph4DoFCorrection published_correction;
-            PlaceGraph4DoFCorrection correction;
-            if (get_latest_global_correction(published_correction) &&
-                sliding_window_tracker->get_latest_global_correction(
-                    correction)) {
-                tracking_ok = false;
-                relocalization_loss_injected_ = true;
-                std::fprintf(stderr,
-                    "[RelocalizationLostProbe] event=forced_loss "
-                    "current=%zu t=%.9f state_mutation=test_only\n",
-                    pending_frame_id, correction.timestamp);
-            }
         }
         if (tracking_ok) {
             if (relocalization_bootstrap_tracking_) {

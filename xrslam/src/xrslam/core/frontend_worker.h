@@ -60,8 +60,6 @@ class FrontendWorker : public Worker {
     PlaceGraph4DoFCorrection global_drift_snapshot_;
     bool global_drift_available_ = false;
 
-    // One-shot, opt-in loss injection for relocalization integration testing.
-    bool relocalization_loss_injected_ = false;
     // Shadow-only two-frame verification; no estimator/graph mutation.
     RelocalizationConsensus relocalization_consensus_;
     MotionState relocalization_last_motion_;

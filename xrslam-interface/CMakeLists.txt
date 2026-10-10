@@ -27,11 +27,6 @@ target_link_libraries(xrslam
     xrslam-extra-yaml-config
 )
 
-if(TARGET xrslam-extra-xfeat)
-  target_link_libraries(xrslam PUBLIC xrslam-extra-xfeat)
-  target_compile_definitions(xrslam PRIVATE XRSLAM_HAS_XFEAT_ONNX=1)
-endif()
-
 if(TARGET xrslam-extra-eigenplaces)
   target_link_libraries(xrslam PRIVATE xrslam-extra-eigenplaces)
   target_compile_definitions(xrslam PRIVATE XRSLAM_HAS_EIGENPLACES=1)
