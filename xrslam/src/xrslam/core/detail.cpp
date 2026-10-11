@@ -164,33 +164,7 @@ Pose XRSLAM::Detail::track_camera(std::shared_ptr<Image> image) {
         frame->tag(FT_FIX_MOTION) = true;
     }
 
-    const char *place_image_shadow =
-        std::getenv("XRSLAM_PLACE_IMAGE_SHADOW");
-    const char *place_descriptor_shadow =
-        std::getenv("XRSLAM_PLACE_DESCRIPTOR_SHADOW");
-    const char *place_retrieval_shadow =
-        std::getenv("XRSLAM_PLACE_RETRIEVAL_SHADOW");
-    const char *local_descriptor_shadow =
-        std::getenv("XRSLAM_LOCAL_DESCRIPTOR_SHADOW");
-    const char *orb_association_shadow =
-        std::getenv("XRSLAM_ORB_ASSOCIATION_SHADOW");
-    const char *orb_pnp_shadow =
-        std::getenv("XRSLAM_ORB_PNP_SHADOW");
-    const bool retain_place_source =
-        relocalization_v1_profile_enabled() ||
-        (place_image_shadow &&
-         std::string(place_image_shadow) == "1") ||
-        (place_descriptor_shadow &&
-         std::string(place_descriptor_shadow) == "1") ||
-        (place_retrieval_shadow &&
-         std::string(place_retrieval_shadow) == "1") ||
-        (local_descriptor_shadow &&
-         std::string(local_descriptor_shadow) == "1") ||
-        (orb_association_shadow &&
-         std::string(orb_association_shadow) == "1") ||
-        (orb_pnp_shadow &&
-         std::string(orb_pnp_shadow) == "1");
-    if (retain_place_source) {
+    if (relocalization_v1_profile_enabled()) {
         image->retain_place_recognition_source(true);
 
         const bool available =

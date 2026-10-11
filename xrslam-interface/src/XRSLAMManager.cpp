@@ -106,18 +106,8 @@ void XRSLAMManager::Init(std::shared_ptr<Config> config) {
     std::shared_ptr<LocalDescriptorExtractor>
         local_descriptor_extractor;
 
-    const char *descriptor_shadow =
-        std::getenv("XRSLAM_PLACE_DESCRIPTOR_SHADOW");
-    const char *retrieval_shadow =
-        std::getenv("XRSLAM_PLACE_RETRIEVAL_SHADOW");
-    const bool retrieval_enabled =
-        relocalization_v1_profile_enabled() ||
-        (retrieval_shadow &&
-         std::string(retrieval_shadow) == "1");
-    const bool descriptor_enabled =
-        (descriptor_shadow &&
-         std::string(descriptor_shadow) == "1") ||
-        retrieval_enabled;
+    const bool retrieval_enabled = relocalization_v1_profile_enabled();
+    const bool descriptor_enabled = retrieval_enabled;
 
     if (descriptor_enabled) {
 #if defined(XRSLAM_HAS_EIGENPLACES)
@@ -125,7 +115,7 @@ void XRSLAMManager::Init(std::shared_ptr<Config> config) {
             std::getenv("XRSLAM_EIGENPLACES_MODEL");
         if (!model_path || model_path[0] == '\0') {
             throw std::runtime_error(
-                "place descriptor/retrieval shadow requires "
+                "XRSLAM_RELOCALIZATION_PROFILE=v1 requires "
                 "XRSLAM_EIGENPLACES_MODEL");
         }
 
@@ -135,7 +125,7 @@ void XRSLAMManager::Init(std::shared_ptr<Config> config) {
                 model_path, false);
 #else
         throw std::runtime_error(
-            "place descriptor/retrieval shadow requires a build "
+            "XRSLAM_RELOCALIZATION_PROFILE=v1 requires a build "
             "configured with XRSLAM_ENABLE_EIGENPLACES=ON");
 #endif
     }
@@ -146,24 +136,12 @@ void XRSLAMManager::Init(std::shared_ptr<Config> config) {
             xrslam::extra::make_usearch_place_database();
 #else
         throw std::runtime_error(
-            "XRSLAM_PLACE_RETRIEVAL_SHADOW=1 requires a build "
+            "XRSLAM_RELOCALIZATION_PROFILE=v1 requires a build "
             "configured with XRSLAM_ENABLE_USEARCH=ON");
 #endif
     }
 
-    const char *local_descriptor_shadow =
-        std::getenv("XRSLAM_LOCAL_DESCRIPTOR_SHADOW");
-    const char *orb_association_shadow =
-        std::getenv("XRSLAM_ORB_ASSOCIATION_SHADOW");
-    const char *orb_pnp_shadow =
-        std::getenv("XRSLAM_ORB_PNP_SHADOW");
-    if ((local_descriptor_shadow &&
-         std::string(local_descriptor_shadow) == "1") ||
-        (orb_association_shadow &&
-         std::string(orb_association_shadow) == "1") ||
-        (orb_pnp_shadow &&
-         std::string(orb_pnp_shadow) == "1") ||
-        relocalization_v1_profile_enabled()) {
+    if (relocalization_v1_profile_enabled()) {
         local_descriptor_extractor =
             std::make_shared<
                 xrslam::extra::OrbLocalDescriptorExtractor>();

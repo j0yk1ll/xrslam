@@ -46,9 +46,7 @@ void FrontendWorker::work(std::unique_lock<std::mutex> &l) {
         synchronized(detail->feature_tracker->map) {
             // Only probe a retained OLD session, and only with the opt-in
             // diagnostic flag. No recovery pose reaches the live estimator.
-            const char *probe = std::getenv("XRSLAM_RELOCALIZATION_PROBE");
-            if ((relocalization_v1_profile_enabled() ||
-                 (probe && std::string(probe) == "1")) &&
+            if (relocalization_v1_profile_enabled() &&
                 persistent_relocalization_map_.session_count() != 0 &&
                 !relocalization_consensus_.confirmed() &&
                 pending_frame_id % 5 == 0) {
@@ -96,9 +94,7 @@ void FrontendWorker::work(std::unique_lock<std::mutex> &l) {
                     }
                 }
             }
-            const char *handoff = std::getenv("XRSLAM_RELOCALIZATION_HANDOFF");
-            if ((relocalization_v1_profile_enabled() ||
-                 (handoff && std::string(handoff) == "1")) &&
+            if (relocalization_v1_profile_enabled() &&
                 relocalization_consensus_.confirmed()) {
                 const auto &seed = *relocalization_consensus_.confirmed();
                 // Never retry a previously attempted seed across initializer
@@ -266,11 +262,7 @@ void FrontendWorker::work(std::unique_lock<std::mutex> &l) {
         // and criteria are unchanged. A persistent run enters the SAME
         // failure path as a normal tracker failure. This is opt-in because
         // its calibration is based on one healthy EuRoC sequence so far.
-        const char *auto_loss = std::getenv(
-            "XRSLAM_RELOCALIZATION_AUTO_LOSS");
-        if (tracking_ok &&
-            (relocalization_v1_profile_enabled() ||
-             (auto_loss && std::string(auto_loss) == "1"))) {
+        if (tracking_ok && relocalization_v1_profile_enabled()) {
             Frame *current = sliding_window_tracker->map->get_frame(
                 sliding_window_tracker->map->frame_num() - 1);
             if (!current->subframes.empty())

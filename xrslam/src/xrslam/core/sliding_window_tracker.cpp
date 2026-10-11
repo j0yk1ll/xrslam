@@ -28,12 +28,6 @@ namespace xrslam {
 
 namespace {
 
-bool place_retrieval_shadow_enabled() {
-    const char *value =
-        std::getenv("XRSLAM_PLACE_RETRIEVAL_SHADOW");
-    return relocalization_v1_profile_enabled() ||
-           (value && std::string(value) == "1");
-}
 
 bool place_recovery_commit_enabled() {
     const char *value =
@@ -47,19 +41,7 @@ bool place_recovery_factor_shadow_enabled() {
     return value && std::string(value) == "1";
 }
 
-bool place_graph_4dof_shadow_enabled() {
-    const char *value =
-        std::getenv("XRSLAM_PLACE_GRAPH_4DOF_SHADOW");
-    return relocalization_v1_profile_enabled() ||
-           (value && std::string(value) == "1");
-}
 
-bool place_descriptor_shadow_enabled() {
-    const char *value =
-        std::getenv("XRSLAM_PLACE_DESCRIPTOR_SHADOW");
-    return (value && std::string(value) == "1") ||
-           place_retrieval_shadow_enabled();
-}
 
 size_t place_retrieval_top_k() {
     constexpr size_t default_top_k = 20;
@@ -91,26 +73,8 @@ size_t place_retrieval_top_k() {
     return static_cast<size_t>(parsed);
 }
 
-bool orb_pnp_shadow_enabled() {
-    const char *value =
-        std::getenv("XRSLAM_ORB_PNP_SHADOW");
-    return relocalization_v1_profile_enabled() ||
-           (value && std::string(value) == "1");
-}
 
-bool orb_association_shadow_enabled() {
-    const char *value =
-        std::getenv("XRSLAM_ORB_ASSOCIATION_SHADOW");
-    return (value && std::string(value) == "1") ||
-           orb_pnp_shadow_enabled();
-}
 
-bool local_descriptor_shadow_enabled() {
-    const char *value =
-        std::getenv("XRSLAM_LOCAL_DESCRIPTOR_SHADOW");
-    return (value && std::string(value) == "1") ||
-           orb_association_shadow_enabled();
-}
 
 size_t orb_association_lag() {
     constexpr size_t default_lag = 20;
@@ -208,13 +172,6 @@ HammingDistanceStats hamming_distance_stats(
     return stats;
 }
 
-bool keyframe_archive_shadow_enabled() {
-    const char *value =
-        std::getenv("XRSLAM_KEYFRAME_ARCHIVE_SHADOW");
-    return (value && std::string(value) == "1") ||
-           local_descriptor_shadow_enabled() ||
-           place_graph_4dof_shadow_enabled();
-}
 
 const char *local_descriptor_type_name(LocalDescriptorType type) {
     switch (type) {
@@ -576,11 +533,11 @@ void SlidingWindowTracker::mirror_frame(Map *feature_tracking_map,
 }
 
 void SlidingWindowTracker::archive_optimized_keyframes() {
-    if (!keyframe_archive_shadow_enabled())
+    if (!relocalization_v1_profile_enabled())
         return;
 
     LocalDescriptorExtractor *local_extractor = nullptr;
-    if (local_descriptor_shadow_enabled()) {
+    if (relocalization_v1_profile_enabled()) {
         if (!detail) {
             std::fprintf(stderr,
                          "[LocalDescriptorShadow] reject=no_detail\n");
@@ -745,12 +702,12 @@ void SlidingWindowTracker::archive_optimized_keyframes() {
                         ++local_descriptor_keyframe_count_;
 
                         const bool place_ready =
-                            !place_descriptor_shadow_enabled() ||
+                            !relocalization_v1_profile_enabled() ||
                             place_keyframes_.find(
                                 static_cast<PlaceKey>(
                                     frame->id()));
                         if (place_ready &&
-                            !orb_association_shadow_enabled()) {
+                            !relocalization_v1_profile_enabled()) {
                             frame->image
                                 ->retain_place_recognition_source(
                                     false);
@@ -836,7 +793,7 @@ void SlidingWindowTracker::archive_optimized_keyframes() {
                 inserted ? 1 : 0, inserted ? 0 : 1);
         }
 
-        if (orb_association_shadow_enabled()) {
+        if (relocalization_v1_profile_enabled()) {
             const ArchivedKeyframe *stored =
                 keyframe_archive_.get(frame->id());
             if (stored &&
@@ -849,7 +806,7 @@ void SlidingWindowTracker::archive_optimized_keyframes() {
                 diagnose_orb_association(frame);
 
                 const bool place_ready =
-                    !place_descriptor_shadow_enabled() ||
+                    !relocalization_v1_profile_enabled() ||
                     place_keyframes_.find(
                         static_cast<PlaceKey>(
                             frame->id()));
@@ -886,7 +843,7 @@ void SlidingWindowTracker::archive_optimized_keyframes() {
 
 void SlidingWindowTracker::diagnose_orb_association(
     Frame *frame) {
-    if (!orb_association_shadow_enabled() ||
+    if (!relocalization_v1_profile_enabled() ||
         !frame || !frame->image || !detail) {
         return;
     }
@@ -1132,7 +1089,7 @@ void SlidingWindowTracker::diagnose_orb_association(
             mutual_stats.max, mutual_stats.mean,
             extract_ms, match_ms);
 
-        if (orb_pnp_shadow_enabled()) {
+        if (relocalization_v1_profile_enabled()) {
             constexpr size_t min_correspondences = 6;
             constexpr size_t min_verified_inliers = 8;
             constexpr double min_verified_inlier_ratio = 0.50;
@@ -1422,8 +1379,8 @@ void SlidingWindowTracker::diagnose_orb_association(
 void SlidingWindowTracker::diagnose_retrieved_place_candidates(
     Frame *frame,
     const std::vector<PlaceCandidate> &candidates) {
-    if (!place_retrieval_shadow_enabled() ||
-        !orb_pnp_shadow_enabled() ||
+    if (!relocalization_v1_profile_enabled() ||
+        !relocalization_v1_profile_enabled() ||
         !frame || !frame->image || !detail ||
         candidates.empty()) {
         return;
@@ -2983,7 +2940,7 @@ void SlidingWindowTracker::diagnose_retrieved_place_candidates(
                             representative.inlier_ratio,
                             acceptance_candidate ? 1 : 0,
                             graph_edge_finite ? 1 : 0);
-                        if (place_graph_4dof_shadow_enabled() &&
+                        if (relocalization_v1_profile_enabled() &&
                             acceptance_candidate &&
                             graph_edge_finite) {
                             PlaceGraph4DoFEdge graph_edge;
@@ -5416,7 +5373,7 @@ diagnose_pending_retrieved_place_candidates() {
         const ArchivedKeyframe *archived =
             keyframe_archive_.get(frame->id());
         const bool local_ready =
-            !local_descriptor_shadow_enabled() ||
+            !relocalization_v1_profile_enabled() ||
             (archived &&
              archived->local_descriptors_complete);
         if (place_ready && local_ready) {
@@ -8340,7 +8297,7 @@ diagnose_place_recovery_commit_reconciliation() {
 }
 
 void SlidingWindowTracker::extract_place_descriptors() {
-    if (!place_descriptor_shadow_enabled())
+    if (!relocalization_v1_profile_enabled())
         return;
 
     if (!detail) {
@@ -8358,7 +8315,7 @@ void SlidingWindowTracker::extract_place_descriptors() {
     }
 
     const bool retrieval_enabled =
-        place_retrieval_shadow_enabled();
+        relocalization_v1_profile_enabled();
     PlaceDatabase *database =
         retrieval_enabled ? detail->place_database() : nullptr;
     const size_t retrieval_top_k =
@@ -8553,7 +8510,7 @@ void SlidingWindowTracker::extract_place_descriptors() {
 
             const bool retrieval_verification_pending =
                 retrieval_enabled &&
-                orb_pnp_shadow_enabled() &&
+                relocalization_v1_profile_enabled() &&
                 !candidates.empty();
             if (retrieval_verification_pending) {
                 PendingPlaceRetrieval pending;
@@ -8564,7 +8521,7 @@ void SlidingWindowTracker::extract_place_descriptors() {
             }
 
             bool local_ready = true;
-            if (local_descriptor_shadow_enabled()) {
+            if (relocalization_v1_profile_enabled()) {
                 const ArchivedKeyframe *archived =
                     keyframe_archive_.get(frame->id());
                 local_ready =
