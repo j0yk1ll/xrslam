@@ -167,12 +167,14 @@ Pose XRSLAM::Detail::track_camera(std::shared_ptr<Image> image) {
     if (relocalization_v1_profile_enabled()) {
         image->retain_place_recognition_source(true);
 
-        const bool available =
-            image->has_place_recognition_source();
+        if (relocalization_verbose_diagnostics()) {
+            const bool available =
+                image->has_place_recognition_source();
         std::fprintf(
             stderr,
             "[PlaceImageRetain] frame_id=%zu t=%.9f available=%d\n",
             frame->id(), image->t, available ? 1 : 0);
+        }
     }
 
     if (config->has_imu())

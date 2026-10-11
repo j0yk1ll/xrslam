@@ -276,7 +276,8 @@ void FrontendWorker::work(std::unique_lock<std::mutex> &l) {
                 health.mapped < 8 ||
                 (health.reprojectable >= 8 && inlier_fraction < 0.20);
             const bool trigger = relocalization_auto_loss_gate_.observe(suspect);
-            std::fprintf(stderr,
+            if (relocalization_verbose_diagnostics())
+                std::fprintf(stderr,
                 "[RelocalizationAutoLoss] event=sample "
                 "frame=%zu t=%.9f suspect=%d mapped=%zu "
                 "reprojectable=%zu inlier6_fraction=%.6f "
@@ -318,7 +319,8 @@ void FrontendWorker::work(std::unique_lock<std::mutex> &l) {
                     last->pose.q.coeffs().allFinite();
                 ++relocalization_bootstrap_steps_;
                 if (good) ++relocalization_bootstrap_good_steps_;
-                std::fprintf(stderr,
+                if (relocalization_verbose_diagnostics())
+                    std::fprintf(stderr,
                     "[RelocalizationBootstrap] event=tracking_step "
                     "current=%zu step=%zu visual_tracks=%zu good=%d "
                     "timestamp=%.9f\n",

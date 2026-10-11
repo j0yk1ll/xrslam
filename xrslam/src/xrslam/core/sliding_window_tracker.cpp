@@ -8423,6 +8423,7 @@ void SlidingWindowTracker::extract_place_descriptors() {
                         const PlaceKeyframe *historical =
                             place_keyframes_.find(candidate.key);
                         if (!historical) {
+                            if (relocalization_verbose_diagnostics())
                             std::fprintf(
                                 stderr,
                                 "[PlaceRetrievalShadow] current=%zu "
@@ -8447,6 +8448,7 @@ void SlidingWindowTracker::extract_place_descriptors() {
                             frame->image->t -
                             historical->timestamp;
 
+                        if (relocalization_verbose_diagnostics())
                         std::fprintf(
                             stderr,
                             "[PlaceRetrievalShadow] current=%zu "
@@ -8481,6 +8483,7 @@ void SlidingWindowTracker::extract_place_descriptors() {
                         index_begin)
                         .count();
 
+                if (relocalization_verbose_diagnostics())
                 std::fprintf(
                     stderr,
                     "[PlaceRetrievalShadow] current=%zu t=%.9f "
@@ -8541,6 +8544,7 @@ void SlidingWindowTracker::extract_place_descriptors() {
                     std::chrono::steady_clock::now() - begin)
                     .count();
 
+            if (relocalization_verbose_diagnostics())
             std::fprintf(
                 stderr,
                 "[PlaceDescriptorShadow] frame_id=%zu t=%.9f "

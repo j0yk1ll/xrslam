@@ -22,5 +22,13 @@ inline bool relocalization_v1_profile_enabled() {
         "XRSLAM_RELOCALIZATION_PROFILE must be 'off' or 'v1'");
 }
 
+// High-volume, observation-level logs are off in normal operation.
+// Failure transitions and accepted/rejected recovery handoffs remain logged.
+// This switch controls output only; it never bypasses health or PnP checks.
+inline bool relocalization_verbose_diagnostics() {
+    const char *setting = std::getenv("XRSLAM_DIAGNOSTICS_VERBOSE");
+    return setting && std::string(setting) == "1";
+}
+
 } // namespace xrslam
 #endif // XRSLAM_RELOCALIZATION_RUNTIME_PROFILE_H
