@@ -87,42 +87,11 @@ class SlidingWindowTracker {
         size_t last_current_frame_id = 0;
     };
 
-    struct PlaceRecoveryCommitReconciliationState {
-        size_t event_id = 0;
-        size_t frame_id = 0;
-        double timestamp = 0.0;
-        PoseState precommit_body_pose;
-        PoseState committed_body_pose;
-        MotionState committed_motion;
-        std::vector<vector<3>> recovery_landmarks_world;
-        std::vector<vector<2>> recovery_observations_pixel;
-        size_t samples_emitted = 0;
-        bool factor_shadow_emitted = false;
-    };
-
-    struct PlaceRecoveryCommitCadenceState {
-        size_t event_id = 0;
-        size_t current_frame_id = 0;
-        double timestamp = 0.0;
-        PlaceKey representative_key = 0;
-        size_t reference_frame_id = 0;
-    };
-
-    struct PlaceRecoveryCommitCancellationState {
-        size_t event_id = 0;
-        size_t current_frame_id = 0;
-        double timestamp = 0.0;
-        double target_translation_m = 0.0;
-        double world_yaw_rad = 0.0;
-        vector<3> world_translation = vector<3>::Zero();
-    };
-
     void archive_optimized_keyframes();
     void diagnose_orb_association(Frame *frame);
     void diagnose_retrieved_place_candidates(
         Frame *frame, const std::vector<PlaceCandidate> &candidates);
     void diagnose_pending_retrieved_place_candidates();
-    void diagnose_place_recovery_commit_reconciliation();
     void extract_place_descriptors();
 
     KeyframeArchive keyframe_archive_;
@@ -143,24 +112,6 @@ class SlidingWindowTracker {
     std::vector<PlaceNeighborhoodEventShadowState>
         previous_dt10_neighborhood_events_;
     size_t next_place_neighborhood_event_id_ = 1;
-    std::vector<PlaceRecoveryCommitReconciliationState>
-        active_place_recovery_commit_reconciliations_;
-
-    // Diagnostic-only history for measuring whether live recoveries form
-    // isolated corrections or rapid/repeated correction sequences. These
-    // values never participate in retrieval, acceptance, or commit gating.
-    bool place_recovery_commit_cadence_available_ = false;
-    PlaceRecoveryCommitCadenceState
-        last_place_recovery_commit_cadence_;
-    size_t successful_place_recovery_commit_count_ = 0;
-    double place_recovery_cumulative_world_yaw_rad_ = 0.0;
-    vector<3> place_recovery_cumulative_world_translation_ =
-        vector<3>::Zero();
-    double place_recovery_cumulative_target_translation_m_ = 0.0;
-    double place_recovery_cumulative_abs_yaw_rad_ = 0.0;
-    std::vector<PlaceRecoveryCommitCancellationState>
-        recent_place_recovery_commits_;
-
     size_t local_descriptor_keyframe_count_ = 0;
     std::unordered_set<size_t> orb_association_processed_;
     std::shared_ptr<Config> config;
