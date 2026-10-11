@@ -27,7 +27,7 @@ enum class LocalDescriptorType : std::uint8_t {
 // Value-owned local descriptors sampled at explicitly supplied image points.
 // source_indices maps every descriptor row back to the input point that
 // produced it. Binary and float storage are both represented so the core
-// archive does not depend on ORB, XFeat, or a particular matching runtime.
+// archive does not depend on a particular descriptor or matching runtime.
 struct LocalDescriptorSet {
     LocalDescriptorType type = LocalDescriptorType::BINARY_U8;
     size_t dimension = 0;
