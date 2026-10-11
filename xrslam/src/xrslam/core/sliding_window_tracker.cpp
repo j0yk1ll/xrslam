@@ -4,6 +4,7 @@
 #include <xrslam/core/keyframe_archive.h>
 #include <xrslam/core/place_graph_4dof_shadow.h>
 #include <xrslam/core/frontend_worker.h>
+#include <xrslam/core/relocalization_runtime_profile.h>
 #include <xrslam/core/sliding_window_tracker.h>
 #include <xrslam/estimation/solver.h>
 #include <xrslam/geometry/lie_algebra.h>
@@ -30,7 +31,8 @@ namespace {
 bool place_retrieval_shadow_enabled() {
     const char *value =
         std::getenv("XRSLAM_PLACE_RETRIEVAL_SHADOW");
-    return value && std::string(value) == "1";
+    return relocalization_v1_profile_enabled() ||
+           (value && std::string(value) == "1");
 }
 
 bool place_recovery_commit_enabled() {
@@ -48,7 +50,8 @@ bool place_recovery_factor_shadow_enabled() {
 bool place_graph_4dof_shadow_enabled() {
     const char *value =
         std::getenv("XRSLAM_PLACE_GRAPH_4DOF_SHADOW");
-    return value && std::string(value) == "1";
+    return relocalization_v1_profile_enabled() ||
+           (value && std::string(value) == "1");
 }
 
 bool place_descriptor_shadow_enabled() {
@@ -91,7 +94,8 @@ size_t place_retrieval_top_k() {
 bool orb_pnp_shadow_enabled() {
     const char *value =
         std::getenv("XRSLAM_ORB_PNP_SHADOW");
-    return value && std::string(value) == "1";
+    return relocalization_v1_profile_enabled() ||
+           (value && std::string(value) == "1");
 }
 
 bool orb_association_shadow_enabled() {

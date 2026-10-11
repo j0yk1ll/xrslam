@@ -2,6 +2,7 @@
 #include <xrslam/core/detail.h>
 #include <xrslam/core/feature_tracker.h>
 #include <xrslam/core/frontend_worker.h>
+#include <xrslam/core/relocalization_runtime_profile.h>
 #include <xrslam/estimation/solver.h>
 #include <xrslam/geometry/lie_algebra.h>
 #include <xrslam/geometry/stereo.h>
@@ -176,6 +177,7 @@ Pose XRSLAM::Detail::track_camera(std::shared_ptr<Image> image) {
     const char *orb_pnp_shadow =
         std::getenv("XRSLAM_ORB_PNP_SHADOW");
     const bool retain_place_source =
+        relocalization_v1_profile_enabled() ||
         (place_image_shadow &&
          std::string(place_image_shadow) == "1") ||
         (place_descriptor_shadow &&

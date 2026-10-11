@@ -7,6 +7,7 @@
 #include <xrslam/core/relocalization_bootstrap.h>
 #include <xrslam/core/relocalization_tracking_health.h>
 #include <xrslam/core/relocalization_auto_loss.h>
+#include <xrslam/core/relocalization_runtime_profile.h>
 #include <xrslam/common.h>
 #include <xrslam/core/detail.h>
 #include <xrslam/core/feature_tracker.h>
@@ -46,7 +47,8 @@ void FrontendWorker::work(std::unique_lock<std::mutex> &l) {
             // Only probe a retained OLD session, and only with the opt-in
             // diagnostic flag. No recovery pose reaches the live estimator.
             const char *probe = std::getenv("XRSLAM_RELOCALIZATION_PROBE");
-            if (probe && std::string(probe) == "1" &&
+            if ((relocalization_v1_profile_enabled() ||
+                 (probe && std::string(probe) == "1")) &&
                 persistent_relocalization_map_.session_count() != 0 &&
                 !relocalization_consensus_.confirmed() &&
                 pending_frame_id % 5 == 0) {
@@ -95,7 +97,8 @@ void FrontendWorker::work(std::unique_lock<std::mutex> &l) {
                 }
             }
             const char *handoff = std::getenv("XRSLAM_RELOCALIZATION_HANDOFF");
-            if (handoff && std::string(handoff) == "1" &&
+            if ((relocalization_v1_profile_enabled() ||
+                 (handoff && std::string(handoff) == "1")) &&
                 relocalization_consensus_.confirmed()) {
                 const auto &seed = *relocalization_consensus_.confirmed();
                 // Never retry a previously attempted seed across initializer
@@ -265,7 +268,9 @@ void FrontendWorker::work(std::unique_lock<std::mutex> &l) {
         // its calibration is based on one healthy EuRoC sequence so far.
         const char *auto_loss = std::getenv(
             "XRSLAM_RELOCALIZATION_AUTO_LOSS");
-        if (tracking_ok && auto_loss && std::string(auto_loss) == "1") {
+        if (tracking_ok &&
+            (relocalization_v1_profile_enabled() ||
+             (auto_loss && std::string(auto_loss) == "1"))) {
             Frame *current = sliding_window_tracker->map->get_frame(
                 sliding_window_tracker->map->frame_num() - 1);
             if (!current->subframes.empty())

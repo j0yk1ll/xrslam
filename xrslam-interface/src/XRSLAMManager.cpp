@@ -3,6 +3,7 @@
 #include <xrslam/core/place_graph_4dof_shadow.h>
 #include <xrslam/place_recognition.h>
 #include <xrslam/extra/orb_local_descriptor_extractor.h>
+#include <xrslam/core/relocalization_runtime_profile.h>
 
 #if defined(XRSLAM_HAS_EIGENPLACES)
 #include <xrslam/extra/eigenplaces_descriptor_extractor.h>
@@ -110,8 +111,9 @@ void XRSLAMManager::Init(std::shared_ptr<Config> config) {
     const char *retrieval_shadow =
         std::getenv("XRSLAM_PLACE_RETRIEVAL_SHADOW");
     const bool retrieval_enabled =
-        retrieval_shadow &&
-        std::string(retrieval_shadow) == "1";
+        relocalization_v1_profile_enabled() ||
+        (retrieval_shadow &&
+         std::string(retrieval_shadow) == "1");
     const bool descriptor_enabled =
         (descriptor_shadow &&
          std::string(descriptor_shadow) == "1") ||
@@ -160,7 +162,8 @@ void XRSLAMManager::Init(std::shared_ptr<Config> config) {
         (orb_association_shadow &&
          std::string(orb_association_shadow) == "1") ||
         (orb_pnp_shadow &&
-         std::string(orb_pnp_shadow) == "1")) {
+         std::string(orb_pnp_shadow) == "1") ||
+        relocalization_v1_profile_enabled()) {
         local_descriptor_extractor =
             std::make_shared<
                 xrslam::extra::OrbLocalDescriptorExtractor>();
