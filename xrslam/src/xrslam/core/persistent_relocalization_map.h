@@ -6,6 +6,7 @@
 #include <xrslam/place_recognition.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -17,6 +18,9 @@ namespace xrslam {
 // until a future relocalization stage establishes an explicit transform.
 struct RelocalizationReferenceSession {
     size_t session_id = 0;
+    // Identity of the active VIO session when the reference was captured.
+    // Unlike session_id, this is assigned before tracking begins.
+    std::uint64_t semantic_tracking_session_id = 0;
     KeyframeArchive archive;
     PlaceKeyframeStore places;
     // Transform from this session's local map frame into the output-global

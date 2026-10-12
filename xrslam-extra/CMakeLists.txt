@@ -127,6 +127,8 @@ if(XRSLAM_ENABLE_PIDNET)
   add_library(xrslam-extra-pidnet
     ${XRSLAM_EXTRA_INCLUDE_DIR}/xrslam/extra/pidnet_segmenter.h
     ${XRSLAM_EXTRA_SOURCE_DIR}/xrslam/extra/pidnet_segmenter.cpp
+    ${XRSLAM_EXTRA_INCLUDE_DIR}/xrslam/extra/pidnet_semantic_worker.h
+    ${XRSLAM_EXTRA_SOURCE_DIR}/xrslam/extra/pidnet_semantic_worker.cpp
   )
   separate_arguments(XRSLAM_PIDNET_TORCH_CXX_FLAGS NATIVE_COMMAND "${TORCH_CXX_FLAGS}")
   target_compile_features(xrslam-extra-pidnet PRIVATE cxx_std_20)

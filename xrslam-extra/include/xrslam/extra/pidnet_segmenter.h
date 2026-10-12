@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <opencv2/core.hpp>
+#include <xrslam/version.h>
 
 namespace xrslam::extra {
 

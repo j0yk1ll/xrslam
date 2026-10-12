@@ -1,6 +1,7 @@
 #ifndef XRSLAM_FRONTEND_WORKER_H
 #define XRSLAM_FRONTEND_WORKER_H
 #include <xrslam/common.h>
+#include <cstdint>
 #include <xrslam/core/place_graph_4dof_shadow.h>
 #include <xrslam/core/persistent_relocalization_map.h>
 #include <xrslam/core/relocalization_consensus.h>
@@ -76,6 +77,9 @@ class FrontendWorker : public Worker {
     // Retained across SlidingWindowTracker destruction. Each capture keeps
     // its own world-frame identity and never feeds the frozen place graph.
     PersistentRelocalizationMap persistent_relocalization_map_;
+    // Active tracking-session IDs must be allocated at initialization,
+    // not after loss when the historical map captures a session.
+    std::uint64_t next_semantic_tracking_session_id_ = 0;
 
     bool global_localization_flag = false;
 };

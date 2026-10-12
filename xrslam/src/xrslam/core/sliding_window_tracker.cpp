@@ -519,7 +519,9 @@ void SlidingWindowTracker::mirror_frame(Map *feature_tracking_map,
 }
 
 void SlidingWindowTracker::archive_optimized_keyframes() {
-    if (!relocalization_v1_profile_enabled())
+    const bool semantic_enabled = semantic_session_id_ != 0 && detail &&
+        detail->semantic_keyframe_sink();
+    if (!relocalization_v1_profile_enabled() && !semantic_enabled)
         return;
 
     LocalDescriptorExtractor *local_extractor = nullptr;
@@ -754,6 +756,52 @@ void SlidingWindowTracker::archive_optimized_keyframes() {
 
         const bool inserted =
             keyframe_archive_.upsert(std::move(archived));
+
+        // Only first archive insertion schedules semantic inference. Later
+        // upserts update optimized geometry without destroying the separate
+        // session/keyframe semantic record. This never alters VIO states.
+        if (inserted && semantic_enabled) {
+            auto staged = staged_semantic_images_.find(frame->id());
+            const ArchivedKeyframe *source =
+                keyframe_archive_.get(frame->id());
+            if (staged != staged_semantic_images_.end() && source) {
+                SemanticKeyframeSnapshot snapshot;
+                snapshot.session_id = semantic_session_id_;
+                snapshot.frame_id = static_cast<std::uint64_t>(frame->id());
+                snapshot.timestamp = source->timestamp;
+                snapshot.image = std::move(staged->second);
+                for (int d = 0; d < 3; ++d)
+                    snapshot.camera_position[d] = source->camera_pose.p[d];
+                snapshot.camera_quaternion_xyzw = {
+                    source->camera_pose.q.x(), source->camera_pose.q.y(),
+                    source->camera_pose.q.z(), source->camera_pose.q.w()};
+                for (int r = 0; r < 3; ++r)
+                    for (int c = 0; c < 3; ++c)
+                        snapshot.K_row_major[3 * r + c] = source->K(r, c);
+                snapshot.observations.reserve(source->observations.size());
+                for (const auto &obs : source->observations)
+                    snapshot.observations.push_back({
+                        obs.track_id, obs.keypoint_index,
+                        obs.pixel.x(), obs.pixel.y()});
+                const bool queued = detail->semantic_keyframe_sink()->submit(
+                    std::move(snapshot));
+                std::fprintf(stderr,
+                    "[PIDNetSemantic] event=keyframe session=%llu "
+                    "frame=%zu t=%.9f queued=%d state_mutation=0\n",
+                    static_cast<unsigned long long>(semantic_session_id_),
+                    frame->id(), source->timestamp, queued ? 1 : 0);
+            } else {
+                std::fprintf(stderr,
+                    "[PIDNetSemantic] event=missing_source session=%llu "
+                    "frame=%zu state_mutation=0\n",
+                    static_cast<unsigned long long>(semantic_session_id_),
+                    frame->id());
+            }
+            // Without place retrieval, the retained source is no longer
+            // needed once a private image snapshot has been submitted.
+            if (!relocalization_v1_profile_enabled())
+                frame->image->retain_place_recognition_source(false);
+        }
 
         // 0112b exact graph-node export. Emit every archive upsert so
         // offline graph reconstruction can retain the latest optimized
@@ -3616,8 +3664,25 @@ bool SlidingWindowTracker::track() {
     if (manage_keyframe()) {
         track_landmark();
         refine_window();
+        // Stage owned pixels BEFORE place recognition can free its source.
+        // This is fast CPU copying only; no Torch/CUDA calls on the tracker.
+        if (semantic_session_id_ != 0 && detail &&
+            detail->semantic_keyframe_sink()) {
+            for (size_t i = 0; i < map->frame_num(); ++i) {
+                Frame *kf = map->get_frame(i);
+                if (!kf || !kf->tag(FT_KEYFRAME) || !kf->image ||
+                    keyframe_archive_.contains(kf->id()) ||
+                    staged_semantic_images_.count(kf->id()))
+                    continue;
+                SemanticPixelBuffer pixels;
+                if (kf->image->copy_semantic_source(pixels) && pixels.valid())
+                    staged_semantic_images_.emplace(kf->id(),
+                                                    std::move(pixels));
+            }
+        }
         extract_place_descriptors();
         archive_optimized_keyframes();
+        staged_semantic_images_.clear();
         diagnose_pending_retrieved_place_candidates();
         slide_window();
     } else {

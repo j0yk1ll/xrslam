@@ -3,6 +3,9 @@
 #include <xrslam/core/place_graph_4dof_shadow.h>
 #include <xrslam/place_recognition.h>
 #include <xrslam/extra/orb_local_descriptor_extractor.h>
+#if defined(XRSLAM_HAS_PIDNET)
+#include <xrslam/extra/pidnet_semantic_worker.h>
+#endif
 #include <xrslam/core/relocalization_runtime_profile.h>
 
 #if defined(XRSLAM_HAS_EIGENPLACES)
@@ -14,6 +17,8 @@
 #endif
 
 #include <cstdlib>
+#include <cstdio>
+#include <string>
 #include <cmath>
 #include <stdexcept>
 
@@ -148,6 +153,28 @@ void XRSLAMManager::Init(std::shared_ptr<Config> config) {
     }
 
     detail_ = std::make_unique<XRSLAM::Detail>(config);
+    const char *semantic_enable = std::getenv("XRSLAM_SEMANTICS_ENABLE");
+    if (semantic_enable && std::string(semantic_enable) == "1") {
+#if defined(XRSLAM_HAS_PIDNET)
+        const char *model = std::getenv("XRSLAM_PIDNET_MODEL");
+        if (!model || model[0] == '\0')
+            throw std::runtime_error(
+                "XRSLAM_SEMANTICS_ENABLE=1 requires XRSLAM_PIDNET_MODEL");
+        const char *device = std::getenv("XRSLAM_PIDNET_DEVICE");
+        const char *outdir = std::getenv("XRSLAM_SEMANTIC_DUMP_DIR");
+        detail_->set_semantic_keyframe_sink(
+            std::make_shared<xrslam::extra::PidNetSemanticWorker>(
+                model, device && device[0] ? device : "cpu", 19,
+                1024, 512, "cityscapes19", outdir ? outdir : "", 2));
+        std::fprintf(stderr,
+            "[PIDNetSemantic] event=enabled device=%s classes=19 "
+            "canvas=1024x512 queue=2 state_mutation=0\n",
+            device && device[0] ? device : "cpu");
+#else
+        throw std::runtime_error(
+            "XRSLAM_SEMANTICS_ENABLE=1 requires XRSLAM_ENABLE_PIDNET=ON");
+#endif
+    }
     detail_->set_place_descriptor_extractor(
         std::move(place_descriptor_extractor));
     detail_->set_place_database(
@@ -162,6 +189,10 @@ void XRSLAMManager::Init(std::shared_ptr<Config> config) {
 }
 
 void XRSLAMManager::Destroy() {
+    // Explicitly stop the tracking threads and join the asynchronous PIDNet
+    // worker while the runtime libraries are still alive. The previous
+    // implementation deferred Detail destruction until singleton teardown.
+    detail_.reset();
     std::cout << "-----------------Destroy XRSLAM v" << XRSLAM_VERSION
               << " successfully-----------" << std::endl;
 }

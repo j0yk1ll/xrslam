@@ -1,5 +1,6 @@
 #include <xrslam/extra/opencv_image.h>
 #include <xrslam/extra/poisson_disk_filter.h>
+#include <cstring>
 
 using namespace cv;
 
@@ -164,6 +165,24 @@ void OpenCvImage::retain_place_recognition_source(bool retain) {
     retain_place_recognition_source_ = retain;
     if (!retain)
         place_recognition_source_.release();
+}
+
+bool OpenCvImage::copy_semantic_source(SemanticPixelBuffer &out) const {
+    const cv::Mat &src = place_recognition_source_;
+    if (src.empty() || src.depth() != CV_8U ||
+        (src.channels() != 1 && src.channels() != 3 && src.channels() != 4))
+        return false;
+    SemanticPixelBuffer copied;
+    copied.width = static_cast<std::uint32_t>(src.cols);
+    copied.height = static_cast<std::uint32_t>(src.rows);
+    copied.channels = static_cast<std::uint32_t>(src.channels());
+    const auto row_bytes = static_cast<std::size_t>(src.cols * src.channels());
+    copied.bytes.resize(row_bytes * static_cast<std::size_t>(src.rows));
+    for (int y = 0; y < src.rows; ++y)
+        std::memcpy(copied.bytes.data() + y * row_bytes,
+                    src.ptr(y), row_bytes);
+    out = std::move(copied);
+    return true;
 }
 
 void OpenCvImage::correct_distortion(const matrix<3> &intrinsics,

@@ -7,6 +7,8 @@
 #include <xrslam/core/persistent_relocalization_map.h>
 #include <xrslam/estimation/state.h>
 #include <xrslam/place_recognition.h>
+#include <xrslam/semantic_mapping.h>
+#include <unordered_map>
 
 #include <unordered_set>
 
@@ -63,6 +65,7 @@ class SlidingWindowTracker {
         RelocalizationReferenceSession session;
         session.archive = std::move(keyframe_archive_);
         session.places = std::move(place_keyframes_);
+        session.semantic_tracking_session_id = semantic_session_id_;
         return session;
     }
 
@@ -73,6 +76,12 @@ class SlidingWindowTracker {
     std::shared_ptr<Map> feature_tracking_map;
 
     void set_detail(XRSLAM::Detail *detail) { this->detail = detail; }
+    void set_semantic_session_id(std::uint64_t id) {
+        semantic_session_id_ = id;
+    }
+    std::uint64_t semantic_session_id() const {
+        return semantic_session_id_;
+    }
   private:
     struct PendingPlaceRetrieval {
         size_t frame_id = 0;
@@ -95,6 +104,9 @@ class SlidingWindowTracker {
     void extract_place_descriptors();
 
     KeyframeArchive keyframe_archive_;
+    std::uint64_t semantic_session_id_ = 0;
+    std::unordered_map<std::size_t, SemanticPixelBuffer>
+        staged_semantic_images_;
     PlaceKeyframeStore place_keyframes_;
     std::vector<PlaceGraph4DoFEdge> place_graph_4dof_edges_;
     bool latest_global_correction_available_ = false;

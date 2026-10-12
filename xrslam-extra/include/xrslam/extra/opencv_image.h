@@ -120,6 +120,7 @@ class OpenCvImage : public Image {
 
     void preprocess(double clipLimit, int width, int height) override;
     void retain_place_recognition_source(bool retain) override;
+    bool copy_semantic_source(SemanticPixelBuffer &out) const override;
     bool has_place_recognition_source() const override {
         return !place_recognition_source_.empty();
     }

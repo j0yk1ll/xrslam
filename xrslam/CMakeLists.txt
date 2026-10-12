@@ -19,6 +19,7 @@ set(PUBLIC_HEADERS
   ${XRSLAM_INCLUDE_DIR}/xrslam/inspection.h
   ${XRSLAM_INCLUDE_DIR}/xrslam/local_feature_backend.h
   ${XRSLAM_INCLUDE_DIR}/xrslam/place_recognition.h
+  ${XRSLAM_INCLUDE_DIR}/xrslam/semantic_mapping.h
   ${XRSLAM_INCLUDE_DIR}/xrslam/xrslam.h
   ${XRSLAM_BINARY_INCLUDE_DIR}/xrslam/version.h
 )

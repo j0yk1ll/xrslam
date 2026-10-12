@@ -164,7 +164,7 @@ Pose XRSLAM::Detail::track_camera(std::shared_ptr<Image> image) {
         frame->tag(FT_FIX_MOTION) = true;
     }
 
-    if (relocalization_v1_profile_enabled()) {
+    if (relocalization_v1_profile_enabled() || semantic_keyframe_sink()) {
         image->retain_place_recognition_source(true);
 
         if (relocalization_verbose_diagnostics()) {

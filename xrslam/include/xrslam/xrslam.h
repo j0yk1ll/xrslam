@@ -7,6 +7,7 @@
 #include <opencv2/opencv.hpp>
 #include <vector>
 #include <xrslam/version.h>
+#include <xrslam/semantic_mapping.h>
 #include <chrono>
 #include <thread>
 
@@ -196,6 +197,11 @@ class Image {
     // source.
     virtual void retain_place_recognition_source(bool retain) {}
     virtual bool has_place_recognition_source() const { return false; }
+    // Copy the unmodified, undistorted canonical camera pixels. Called
+    // only on accepted keyframes, before backend source release.
+    virtual bool copy_semantic_source(SemanticPixelBuffer &) const {
+        return false;
+    }
 
     virtual void release_image_buffer() = 0;
     virtual void detect_keypoints(std::vector<vector<2>> &keypoints,

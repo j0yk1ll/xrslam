@@ -176,6 +176,11 @@ void FrontendWorker::work(std::unique_lock<std::mutex> &l) {
         if (!sliding_window_tracker)
             sliding_window_tracker = initializer->initialize();
         if (sliding_window_tracker) {
+            if (detail->semantic_keyframe_sink() &&
+                sliding_window_tracker->semantic_session_id() == 0) {
+                sliding_window_tracker->set_semantic_session_id(
+                    ++next_semantic_tracking_session_id_);
+            }
 #if defined(XRSLAM_IOS)
             synchronized(detail->feature_tracker->keymap) {
                 detail->feature_tracker->synchronize_keymap(

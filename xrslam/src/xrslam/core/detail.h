@@ -4,6 +4,7 @@
 #include <xrslam/common.h>
 #include <xrslam/xrslam.h>
 #include <mutex>
+#include <utility>
 namespace xrslam {
 
 class Config;
@@ -16,6 +17,7 @@ class LocalDescriptorExtractor;
 class PlaceDescriptorExtractor;
 class PlaceDatabase;
 class Synchronizer;
+class SemanticKeyframeSink;
 struct PlaceGraph4DoFCorrection;
 
 struct XRSLAM::Detail {
@@ -57,6 +59,17 @@ struct XRSLAM::Detail {
     bool get_latest_global_correction(
         PlaceGraph4DoFCorrection &correction) const;
 
+    void set_semantic_keyframe_sink(
+        std::shared_ptr<SemanticKeyframeSink> sink) {
+        semantic_keyframe_sink_ = std::move(sink);
+    }
+    SemanticKeyframeSink *semantic_keyframe_sink() const {
+        return semantic_keyframe_sink_.get();
+    }
+
+    // Declared BEFORE frontend so worker destruction/join happens AFTER
+    // frontend has stopped. All submit calls are from the frontend thread.
+    std::shared_ptr<SemanticKeyframeSink> semantic_keyframe_sink_;
     std::unique_ptr<FeatureTracker> feature_tracker;
     std::unique_ptr<FrontendWorker> frontend;
 
