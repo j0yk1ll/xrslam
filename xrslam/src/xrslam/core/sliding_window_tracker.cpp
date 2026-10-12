@@ -782,7 +782,10 @@ void SlidingWindowTracker::archive_optimized_keyframes() {
                 for (const auto &obs : source->observations)
                     snapshot.observations.push_back({
                         obs.track_id, obs.keypoint_index,
-                        obs.pixel.x(), obs.pixel.y()});
+                        obs.pixel.x(), obs.pixel.y(),
+                        {obs.landmark_world.x(),
+                         obs.landmark_world.y(),
+                         obs.landmark_world.z()}});
                 const bool queued = detail->semantic_keyframe_sink()->submit(
                     std::move(snapshot));
                 std::fprintf(stderr,

@@ -30,6 +30,9 @@ struct SemanticArchiveObservation {
     std::size_t keypoint_index = 0;
     double u = 0.0;
     double v = 0.0;
+    // Optimized landmark position in this VIO session local world.
+    // Not globally aligned and never sent back to the estimator.
+    std::array<double, 3> position_session_world{};
 };
 
 struct SemanticKeyframeSnapshot {

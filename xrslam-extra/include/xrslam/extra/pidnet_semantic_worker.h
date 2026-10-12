@@ -2,6 +2,7 @@
 #define XRSLAM_EXTRA_PIDNET_SEMANTIC_WORKER_H
 
 #include <xrslam/semantic_mapping.h>
+#include <xrslam/semantic_landmark_map.h>
 #include <xrslam/extra/pidnet_segmenter.h>
 
 #include <cstddef>
@@ -23,6 +24,7 @@ struct SemanticLandmarkSample {
     std::size_t keypoint_index = 0;
     std::uint8_t label = 0;
     float confidence = 0.0f;
+    std::array<double, 3> position_session_world{};
 };
 
 struct SemanticKeyframeRecord {
@@ -64,6 +66,15 @@ class PidNetSemanticWorker final : public SemanticKeyframeSink {
         std::uint64_t session_id, std::uint64_t frame_id) const;
     std::size_t record_count() const;
 
+    // Persistent session-local semantic landmark map; immutable copies.
+    std::optional<SemanticFusedLandmark> find_landmark(
+        std::uint64_t session_id, std::size_t track_id) const;
+    std::vector<SemanticFusedLandmark> landmark_snapshot(
+        std::optional<std::uint64_t> session_id = std::nullopt,
+        bool stable_only = false) const;
+    std::size_t landmark_count() const;
+    std::size_t stable_landmark_count() const;
+
   private:
     void run() noexcept;
     void process(SemanticKeyframeSnapshot snapshot);
@@ -78,6 +89,7 @@ class PidNetSemanticWorker final : public SemanticKeyframeSink {
     std::deque<SemanticKeyframeSnapshot> pending_;
     std::map<std::pair<std::uint64_t, std::uint64_t>,
              SemanticKeyframeRecord> records_;
+    SemanticLandmarkMap landmark_map_; // guarded by mutex_
     bool stopping_ = false;
     std::uint64_t dropped_ = 0;
     std::thread thread_;

@@ -147,4 +147,14 @@ if(XRSLAM_ENABLE_PIDNET)
     PRIVATE xrslam-extra-pidnet depends::opencv)
 endif()
 
+# Pure C++ verification of multi-view fusion and session isolation.
+# No model checkpoint or GPU is needed for this test target.
+if(XRSLAM_ENABLE_PIDNET)
+  add_executable(xrslam-semantic-landmark-fusion-smoke
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools/semantic_landmark_fusion_smoke.cpp
+  )
+  target_compile_features(xrslam-semantic-landmark-fusion-smoke PRIVATE cxx_std_17)
+  target_link_libraries(xrslam-semantic-landmark-fusion-smoke PRIVATE xrslam-core)
+endif()
+
 set(XRSLAM_EXTRA_LIBRARY_DIR ${CMAKE_CURRENT_BINARY_DIR} CACHE INTERNAL "")
