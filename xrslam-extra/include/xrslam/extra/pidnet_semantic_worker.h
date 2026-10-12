@@ -3,6 +3,8 @@
 
 #include <xrslam/semantic_mapping.h>
 #include <xrslam/semantic_landmark_map.h>
+#include <xrslam/dense_semantic_voxel_map.h>
+#include <xrslam/dense_semantic_depth_filter.h>
 #include <xrslam/extra/pidnet_segmenter.h>
 
 #include <cstddef>
@@ -11,6 +13,7 @@
 #include <deque>
 #include <map>
 #include <mutex>
+#include <memory>
 #include <optional>
 #include <string>
 #include <thread>
@@ -54,13 +57,23 @@ class PidNetSemanticWorker final : public SemanticKeyframeSink {
                          int canvas_height,
                          std::string taxonomy,
                          std::string dump_dir = {},
-                         std::size_t max_pending = 2);
+                         std::size_t max_pending = 2,
+                         bool enable_dense = false,
+                         double dense_voxel_size_m = 0.03,
+                         int dense_pixel_stride = 4,
+                         DenseSemanticQualityOptions quality = {});
     ~PidNetSemanticWorker() override;
 
     PidNetSemanticWorker(const PidNetSemanticWorker &) = delete;
     PidNetSemanticWorker &operator=(const PidNetSemanticWorker &) = delete;
 
     bool submit(SemanticKeyframeSnapshot &&snapshot) noexcept override;
+    bool wants_metric_depth() const noexcept override {
+        return static_cast<bool>(dense_map_);
+    }
+    // Explicit readout barrier, only for end-of-replay export. Never called
+    // on the VIO hot path. Covers already accepted jobs, not future submits.
+    void wait_until_idle();
 
     std::optional<SemanticKeyframeRecord> find(
         std::uint64_t session_id, std::uint64_t frame_id) const;
@@ -74,6 +87,10 @@ class PidNetSemanticWorker final : public SemanticKeyframeSink {
         bool stable_only = false) const;
     std::size_t landmark_count() const;
     std::size_t stable_landmark_count() const;
+    std::vector<DenseSemanticVoxelPoint> dense_snapshot(
+        bool stable_only = false) const;
+    double dense_voxel_size_m() const;
+
 
   private:
     void run() noexcept;
@@ -83,13 +100,18 @@ class PidNetSemanticWorker final : public SemanticKeyframeSink {
     const std::string taxonomy_;
     const std::string dump_dir_;
     const std::size_t max_pending_;
+    const int dense_pixel_stride_;
+    const DenseSemanticQualityOptions dense_quality_;
 
     mutable std::mutex mutex_;
     std::condition_variable wakeup_;
+    std::condition_variable idle_cv_;
+    bool processing_ = false; // protected by mutex_
     std::deque<SemanticKeyframeSnapshot> pending_;
     std::map<std::pair<std::uint64_t, std::uint64_t>,
              SemanticKeyframeRecord> records_;
     SemanticLandmarkMap landmark_map_; // guarded by mutex_
+    std::unique_ptr<DenseSemanticVoxelMap> dense_map_; // guarded by mutex_
     bool stopping_ = false;
     std::uint64_t dropped_ = 0;
     std::thread thread_;

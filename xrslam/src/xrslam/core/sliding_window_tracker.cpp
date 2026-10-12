@@ -770,6 +770,9 @@ void SlidingWindowTracker::archive_optimized_keyframes() {
                 snapshot.frame_id = static_cast<std::uint64_t>(frame->id());
                 snapshot.timestamp = source->timestamp;
                 snapshot.image = std::move(staged->second);
+                auto depth = staged_semantic_depths_.find(frame->id());
+                if (depth != staged_semantic_depths_.end())
+                    snapshot.depth = std::move(depth->second);
                 for (int d = 0; d < 3; ++d)
                     snapshot.camera_position[d] = source->camera_pose.p[d];
                 snapshot.camera_quaternion_xyzw = {
@@ -3678,14 +3681,24 @@ bool SlidingWindowTracker::track() {
                     staged_semantic_images_.count(kf->id()))
                     continue;
                 SemanticPixelBuffer pixels;
-                if (kf->image->copy_semantic_source(pixels) && pixels.valid())
+                if (kf->image->copy_semantic_source(pixels) && pixels.valid()) {
+                    if (detail->semantic_keyframe_sink()->wants_metric_depth()) {
+                        SemanticMetricDepthBuffer depth;
+                        if (kf->image->copy_semantic_metric_depth(depth) &&
+                            depth.valid() && depth.width == pixels.width &&
+                            depth.height == pixels.height)
+                            staged_semantic_depths_.emplace(kf->id(),
+                                                            std::move(depth));
+                    }
                     staged_semantic_images_.emplace(kf->id(),
                                                     std::move(pixels));
+                }
             }
         }
         extract_place_descriptors();
         archive_optimized_keyframes();
         staged_semantic_images_.clear();
+        staged_semantic_depths_.clear();
         diagnose_pending_retrieved_place_candidates();
         slide_window();
     } else {

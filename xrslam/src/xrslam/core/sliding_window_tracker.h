@@ -107,6 +107,8 @@ class SlidingWindowTracker {
     std::uint64_t semantic_session_id_ = 0;
     std::unordered_map<std::size_t, SemanticPixelBuffer>
         staged_semantic_images_;
+    std::unordered_map<std::size_t, SemanticMetricDepthBuffer>
+        staged_semantic_depths_;
     PlaceKeyframeStore place_keyframes_;
     std::vector<PlaceGraph4DoFEdge> place_graph_4dof_edges_;
     bool latest_global_correction_available_ = false;

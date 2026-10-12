@@ -185,8 +185,32 @@ bool OpenCvImage::copy_semantic_source(SemanticPixelBuffer &out) const {
     return true;
 }
 
+bool OpenCvImage::copy_semantic_metric_depth(
+    SemanticMetricDepthBuffer &out) const {
+    const cv::Mat &d = depth_image;
+    if (depth_source_type != DepthSource::SENSOR_METRIC ||
+        semantic_depth_rectification_unsupported_ || d.empty() ||
+        d.type() != CV_32FC1 ||
+        place_recognition_source_.empty() ||
+        d.size() != place_recognition_source_.size())
+        return false;
+    SemanticMetricDepthBuffer copied;
+    copied.width = static_cast<std::uint32_t>(d.cols);
+    copied.height = static_cast<std::uint32_t>(d.rows);
+    copied.meters.resize(static_cast<size_t>(d.rows) * d.cols);
+    for (int y = 0; y < d.rows; ++y)
+        std::memcpy(copied.meters.data() + static_cast<size_t>(y) * d.cols,
+                    d.ptr<float>(y), static_cast<size_t>(d.cols) * sizeof(float));
+    out = std::move(copied);
+    return true;
+}
+
 void OpenCvImage::correct_distortion(const matrix<3> &intrinsics,
                                      const vector<4> &coeffs) {
+    // The current VIO implementation rectifies the image but does not
+    // rectify depth. Never fuse such depth as if it were pixel-aligned.
+    if (!depth_image.empty())
+        semantic_depth_rectification_unsupported_ = true;
     Mat new_image;
     Mat K(3, 3, CV_32FC1), cvcoeffs(1, 4, CV_32FC1);
     for (int i = 0; i < 3; ++i) {

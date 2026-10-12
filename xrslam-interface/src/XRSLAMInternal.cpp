@@ -106,4 +106,22 @@ void XRSLAMGetResult(XRSLAMResultType result_type, // result type
     }
 }
 
+size_t XRSLAMGetSemanticMapSnapshot(XRSLAMSemanticMapPoint *dst,
+                                    size_t capacity, size_t *total,
+                                    int stable_only) {
+    return xrslam::XRSLAMManager::Instance().CopySemanticMap(
+        dst, capacity, total, stable_only != 0);
+}
+
+int XRSLAMWaitForSemanticIdle(void) {
+    return xrslam::XRSLAMManager::Instance().WaitForSemanticIdle() ? 1 : 0;
+}
+
+size_t XRSLAMGetDenseSemanticMapSnapshot(XRSLAMDenseSemanticPoint *dst,
+                                         size_t capacity, size_t *total,
+                                         int stable_only) {
+    return xrslam::XRSLAMManager::Instance().CopyDenseSemanticMap(
+        dst, capacity, total, stable_only != 0);
+}
+
 void XRSLAMDestroy() { xrslam::XRSLAMManager::Instance().Destroy(); }

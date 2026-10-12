@@ -157,4 +157,16 @@ if(XRSLAM_ENABLE_PIDNET)
   target_link_libraries(xrslam-semantic-landmark-fusion-smoke PRIVATE xrslam-core)
 endif()
 
+if(XRSLAM_ENABLE_PIDNET)
+  add_executable(xrslam-dense-semantic-quality-smoke
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools/dense_semantic_quality_smoke.cpp)
+  target_compile_features(xrslam-dense-semantic-quality-smoke PRIVATE cxx_std_17)
+  target_link_libraries(xrslam-dense-semantic-quality-smoke PRIVATE xrslam-core)
+
+  add_executable(xrslam-dense-semantic-voxel-smoke
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools/dense_semantic_voxel_smoke.cpp)
+  target_compile_features(xrslam-dense-semantic-voxel-smoke PRIVATE cxx_std_17)
+  target_link_libraries(xrslam-dense-semantic-voxel-smoke PRIVATE xrslam-core)
+endif()
+
 set(XRSLAM_EXTRA_LIBRARY_DIR ${CMAKE_CURRENT_BINARY_DIR} CACHE INTERNAL "")

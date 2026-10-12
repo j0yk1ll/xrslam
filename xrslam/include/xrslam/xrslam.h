@@ -202,6 +202,10 @@ class Image {
     virtual bool copy_semantic_source(SemanticPixelBuffer &) const {
         return false;
     }
+    // Optional metric Z-depth snapshot in exactly the semantic image pixels.
+    virtual bool copy_semantic_metric_depth(SemanticMetricDepthBuffer &) const {
+        return false;
+    }
 
     virtual void release_image_buffer() = 0;
     virtual void detect_keypoints(std::vector<vector<2>> &keypoints,

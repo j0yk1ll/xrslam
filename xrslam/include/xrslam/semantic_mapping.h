@@ -25,6 +25,17 @@ struct SemanticPixelBuffer {
     }
 };
 
+// Packed sensor-metric Z-depth (meters), explicitly registered to the
+// canonical semantic image pixels. Never reinterpret monocular-relative depth.
+struct SemanticMetricDepthBuffer {
+    std::uint32_t width = 0, height = 0;
+    std::vector<float> meters;
+    bool valid() const {
+        return width > 0 && height > 0 &&
+            meters.size() == static_cast<std::size_t>(width) * height;
+    }
+};
+
 struct SemanticArchiveObservation {
     std::size_t track_id = 0;
     std::size_t keypoint_index = 0;
@@ -40,6 +51,7 @@ struct SemanticKeyframeSnapshot {
     std::uint64_t frame_id = 0;
     double timestamp = 0.0;
     SemanticPixelBuffer image;
+    SemanticMetricDepthBuffer depth; // empty for non-RGBD/unsupported sources
     // Session-local optimized camera pose at first archival. Latest geometry
     // remains in KeyframeArchive, which can be refreshed independently.
     std::array<double, 3> camera_position{};
@@ -54,6 +66,7 @@ class SemanticKeyframeSink {
     // Never perform neural inference in submit(). Queue may be full; dropping
     // semantic work must never stop or back-pressure visual-inertial tracking.
     virtual bool submit(SemanticKeyframeSnapshot &&snapshot) noexcept = 0;
+    virtual bool wants_metric_depth() const noexcept { return false; }
 };
 
 } // namespace xrslam

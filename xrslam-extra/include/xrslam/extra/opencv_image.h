@@ -121,6 +121,7 @@ class OpenCvImage : public Image {
     void preprocess(double clipLimit, int width, int height) override;
     void retain_place_recognition_source(bool retain) override;
     bool copy_semantic_source(SemanticPixelBuffer &out) const override;
+    bool copy_semantic_metric_depth(SemanticMetricDepthBuffer &out) const override;
     bool has_place_recognition_source() const override {
         return !place_recognition_source_.empty();
     }
@@ -144,6 +145,9 @@ class OpenCvImage : public Image {
   private:
     cv::Mat place_recognition_source_;
     bool retain_place_recognition_source_ = false;
+    // If camera pixels are undistorted without depth, depth pixel registration
+    // is no longer guaranteed. Refuse dense mapping, do not alter VIO depth.
+    bool semantic_depth_rectification_unsupported_ = false;
     std::vector<cv::Mat> image_pyramid;
     std::vector<cv::Mat> image_levels;
     std::vector<vector<2>> scale_levels;

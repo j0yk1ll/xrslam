@@ -1,6 +1,8 @@
 #include <tum_rgbd_dataset_reader.h>
 
 #include <cmath>
+#include <cstdlib>
+#include <string>
 #include <fstream>
 #include <limits>
 #include <sstream>
@@ -80,7 +82,12 @@ std::pair<double, cv::Mat> TUMRGBDDatasetReader::read_image() {
     const RGBDFrame frame = frames.front();
     frames.pop_front();
 
-    cv::Mat rgb = cv::imread(frame.rgb_path, cv::IMREAD_GRAYSCALE);
+    // RGB is opt-in to preserve pixel-identical tracking benchmarks.
+    // When enabled, XRSLAMManager still converts BGR to tracker grayscale.
+    const char *use_rgb = std::getenv("XRSLAM_DENSE_TUM_COLOR");
+    cv::Mat rgb = cv::imread(frame.rgb_path,
+        use_rgb && std::string(use_rgb) == "1" ?
+        cv::IMREAD_COLOR : cv::IMREAD_GRAYSCALE);
     cv::Mat depth = cv::imread(frame.depth_path, cv::IMREAD_UNCHANGED);
 
     if (rgb.empty() || depth.empty() || depth.type() != CV_16UC1 ||

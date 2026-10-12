@@ -16,6 +16,8 @@
 #include <xrslam/extra/usearch_place_database.h>
 #endif
 
+#include <algorithm>
+#include <optional>
 #include <cstdlib>
 #include <cstdio>
 #include <string>
@@ -152,6 +154,13 @@ void XRSLAMManager::Init(std::shared_ptr<Config> config) {
                 xrslam::extra::OrbLocalDescriptorExtractor>();
     }
 
+    const char *dense_enable = std::getenv("XRSLAM_DENSE_SEMANTICS_ENABLE");
+    const bool dense_requested = dense_enable &&
+        std::string(dense_enable) == "1";
+    const char *semantic_enabled_check = std::getenv("XRSLAM_SEMANTICS_ENABLE");
+    if (dense_requested && (!semantic_enabled_check ||
+        std::string(semantic_enabled_check) != "1"))
+        throw std::runtime_error("dense semantics require XRSLAM_SEMANTICS_ENABLE=1");
     detail_ = std::make_unique<XRSLAM::Detail>(config);
     const char *semantic_enable = std::getenv("XRSLAM_SEMANTICS_ENABLE");
     if (semantic_enable && std::string(semantic_enable) == "1") {
@@ -162,10 +171,48 @@ void XRSLAMManager::Init(std::shared_ptr<Config> config) {
                 "XRSLAM_SEMANTICS_ENABLE=1 requires XRSLAM_PIDNET_MODEL");
         const char *device = std::getenv("XRSLAM_PIDNET_DEVICE");
         const char *outdir = std::getenv("XRSLAM_SEMANTIC_DUMP_DIR");
+        const char *voxel_env = std::getenv("XRSLAM_DENSE_VOXEL_SIZE_M");
+        const char *stride_env = std::getenv("XRSLAM_DENSE_PIXEL_STRIDE");
+        const double voxel = voxel_env ? std::stod(voxel_env) : 0.03;
+        const int stride = stride_env ? std::stoi(stride_env) : 4;
+        DenseSemanticQualityOptions quality;
+        const char *quality_enable = std::getenv("XRSLAM_DENSE_QUALITY_ENABLE");
+        quality.enabled = quality_enable && std::string(quality_enable) == "1";
+        if (quality.enabled) {
+            if (!dense_requested)
+                throw std::invalid_argument(
+                    "dense quality requires XRSLAM_DENSE_SEMANTICS_ENABLE=1");
+            const char *abs_m = std::getenv("XRSLAM_DENSE_EDGE_ABS_M");
+            const char *relative = std::getenv("XRSLAM_DENSE_EDGE_REL");
+            const char *views = std::getenv("XRSLAM_DENSE_MIN_VIEWS");
+            const char *neighbors = std::getenv("XRSLAM_DENSE_MIN_NEIGHBORS");
+            quality.depth_edge_abs_m = abs_m ? std::stod(abs_m) : 0.08;
+            quality.depth_edge_relative = relative ? std::stod(relative) : 0.03;
+            const int minimum_views = views ? std::stoi(views) : 2;
+            const int minimum_neighbors = neighbors ? std::stoi(neighbors) : 2;
+            if (minimum_views < 1 || minimum_views > 64 ||
+                minimum_neighbors < 0 || minimum_neighbors > 26)
+                throw std::invalid_argument(
+                    "dense quality view/neighbor bounds exceeded");
+            quality.min_views = static_cast<std::uint32_t>(minimum_views);
+            quality.min_neighbors = static_cast<std::uint32_t>(minimum_neighbors);
+            quality.validate();
+            std::fprintf(stderr,
+                "[DenseSemanticQuality] event=enabled edge_abs_m=%.5f "
+                "edge_rel=%.5f min_views=%u min_neighbors=%u "
+                "depth_holes_rejected=1 output_only=1\n",
+                quality.depth_edge_abs_m, quality.depth_edge_relative,
+                quality.min_views, quality.min_neighbors);
+        }
         detail_->set_semantic_keyframe_sink(
             std::make_shared<xrslam::extra::PidNetSemanticWorker>(
                 model, device && device[0] ? device : "cpu", 19,
-                1024, 512, "cityscapes19", outdir ? outdir : "", 2));
+                1024, 512, "cityscapes19", outdir ? outdir : "", 2,
+                dense_requested, voxel, stride, quality));
+        if (dense_requested)
+            std::fprintf(stderr, "[DenseSemantic] event=enabled voxel=%.6f "
+                                 "pixel_stride=%d max_voxels=250000\n",
+                         voxel, stride);
         std::fprintf(stderr,
             "[PIDNetSemantic] event=enabled device=%s classes=19 "
             "canvas=1024x512 queue=2 state_mutation=0\n",
@@ -195,6 +242,91 @@ void XRSLAMManager::Destroy() {
     detail_.reset();
     std::cout << "-----------------Destroy XRSLAM v" << XRSLAM_VERSION
               << " successfully-----------" << std::endl;
+}
+
+size_t XRSLAMManager::CopySemanticMap(
+    XRSLAMSemanticMapPoint *dst, size_t capacity,
+    size_t *total, bool stable_only) const {
+    if (total) *total = 0;
+    if (capacity && !dst) return 0;
+#if defined(XRSLAM_HAS_PIDNET)
+    if (!detail_) return 0;
+    // The configured PIDNet sink is held alive by Detail. The worker returns
+    // immutable value copies under its own mutex, never pointers to its map.
+    auto *worker = dynamic_cast<extra::PidNetSemanticWorker *>(
+        detail_->semantic_keyframe_sink());
+    if (!worker) return 0;
+    const auto snapshot = worker->landmark_snapshot(std::nullopt, stable_only);
+    if (total) *total = snapshot.size();
+    const size_t copied = std::min(capacity, snapshot.size());
+    for (size_t i = 0; i < copied; ++i) {
+        const auto &p = snapshot[i];
+        auto &out = dst[i];
+        out.session_id = p.session_id;
+        out.track_id = static_cast<uint64_t>(p.track_id);
+        out.latest_frame_id = p.latest_frame_id;
+        for (int j = 0; j < 3; ++j)
+            out.xyz[j] = p.position_session_world[j];
+        out.consensus = p.consensus_fraction;
+        out.mean_pixel_confidence = p.mean_pixel_confidence;
+        out.observation_count = p.observation_count;
+        out.winning_label_views = p.winning_label_views;
+        out.semantic_class = p.winning_label;
+        out.stable = p.stable ? 1 : 0;
+    }
+    return copied;
+#else
+    (void)dst;
+    (void)capacity;
+    (void)stable_only;
+    return 0;
+#endif
+}
+
+bool XRSLAMManager::WaitForSemanticIdle() const {
+#if defined(XRSLAM_HAS_PIDNET)
+    if (!detail_) return false;
+    auto *worker = dynamic_cast<extra::PidNetSemanticWorker *>(
+        detail_->semantic_keyframe_sink());
+    if (!worker) return false;
+    worker->wait_until_idle();
+    return true;
+#else
+    return false;
+#endif
+}
+
+size_t XRSLAMManager::CopyDenseSemanticMap(
+    XRSLAMDenseSemanticPoint *dst, size_t capacity,
+    size_t *total, bool stable_only) const {
+    if (total) *total = 0;
+    if (capacity && !dst) return 0;
+#if defined(XRSLAM_HAS_PIDNET)
+    if (!detail_) return 0;
+    auto *worker = dynamic_cast<extra::PidNetSemanticWorker *>(
+        detail_->semantic_keyframe_sink());
+    if (!worker) return 0;
+    const auto points = worker->dense_snapshot(stable_only);
+    if (total) *total = points.size();
+    const size_t copied = std::min(capacity, points.size());
+    for (size_t i = 0; i < copied; ++i) {
+        const auto &p = points[i];
+        auto &d = dst[i];
+        d.session_id = p.session_id;
+        d.voxel_ix = p.ix; d.voxel_iy = p.iy; d.voxel_iz = p.iz;
+        for (int k = 0; k < 3; ++k) {
+            d.xyz[k] = p.xyz[k];
+            d.rgb[k] = p.rgb[k];
+        }
+        d.semantic_class = p.semantic_class;
+        d.consensus = p.consensus;
+        d.observation_count = p.observation_count;
+        d.stable = p.stable ? 1 : 0;
+    }
+    return copied;
+#else
+    return 0;
+#endif
 }
 
 int XRSLAMManager::CheckLicense(const char *license_path,

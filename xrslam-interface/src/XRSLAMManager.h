@@ -33,6 +33,13 @@ class XRSLAMManager {
 
     void Destroy();
 
+    size_t CopySemanticMap(XRSLAMSemanticMapPoint *dst, size_t capacity,
+                           size_t *total, bool stable_only) const;
+    bool WaitForSemanticIdle() const;
+    size_t CopyDenseSemanticMap(XRSLAMDenseSemanticPoint *dst,
+                                size_t capacity, size_t *total,
+                                bool stable_only) const;
+
     void GetResultCameraPose(XRSLAMPose *pose) const;
     void GetResultBodyPose(XRSLAMPose *pose) const;
     void GetResultGlobalBodyPose(XRSLAMPose *pose) const;

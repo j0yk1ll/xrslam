@@ -6,6 +6,7 @@
 #ifndef _XRSLAM_H_
 #define _XRSLAM_H_
 #include <stdint.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -248,6 +249,59 @@ void XRSLAMSetViewer(void *viewer);
  * @param[out] result_data result data.
  */
 void XRSLAMGetResult(XRSLAMResultType result_type, void *result_data);
+
+/* 0122d: read-only semantic map. All XYZ remain in their originating
+ * VIO session-local frame. This API does not merge or transform sessions.
+ * Caller owns the destination array; no pointer aliases XRSLAM internals.
+ * Split track/frame IDs in PLY, but retain full uint64 IDs in this API.
+ */
+typedef struct XRSLAMSemanticMapPoint {
+    uint64_t session_id;
+    uint64_t track_id;
+    uint64_t latest_frame_id;
+    double xyz[3];
+    double consensus; /* weighted agreement fraction, not calibrated probability */
+    double mean_pixel_confidence;
+    uint64_t observation_count;
+    uint64_t winning_label_views;
+    uint8_t semantic_class;
+    uint8_t stable;
+} XRSLAMSemanticMapPoint;
+
+/* Returns count actually copied (<=capacity). *total receives the count
+ * at the instant of this copy. Query with dst=NULL, capacity=0 first; a
+ * concurrent inference may change the total between two calls.
+ * stable_only=1 filters to stable (2+ agreeing views, consensus >=0.65).
+ * Must not race XRSLAMDestroy or XRSLAMCreate.
+ */
+size_t XRSLAMGetSemanticMapSnapshot(XRSLAMSemanticMapPoint *dst,
+                                    size_t capacity, size_t *total,
+                                    int stable_only);
+
+/* Wait for the jobs currently accepted by the semantic worker to finish.
+ * Call only after dataset submission ends; do not invoke in the VIO loop.
+ * Returns 1 when semantics are enabled, 0 otherwise.
+ */
+int XRSLAMWaitForSemanticIdle(void);
+
+/* Read-only depth-backed semantic voxel cloud, in session-local coordinates.
+ * RGB is canonical camera appearance; class is PIDNet semantic index.
+ * No session merging, TSDF, or mesh connectivity is implied.
+ */
+typedef struct XRSLAMDenseSemanticPoint {
+    uint64_t session_id;
+    int32_t voxel_ix, voxel_iy, voxel_iz;
+    double xyz[3];
+    uint8_t rgb[3];
+    uint8_t semantic_class;
+    double consensus;
+    uint32_t observation_count;
+    uint8_t stable;
+} XRSLAMDenseSemanticPoint;
+
+size_t XRSLAMGetDenseSemanticMapSnapshot(XRSLAMDenseSemanticPoint *dst,
+                                         size_t capacity, size_t *total,
+                                         int stable_only);
 
 /**
  * @brief destroy SLAM system

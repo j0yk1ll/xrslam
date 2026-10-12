@@ -1,5 +1,8 @@
 #include <argparse.hpp>
 #include <chrono>
+#include <cstdint>
+#include <vector>
+#include <string>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
@@ -11,6 +14,8 @@
 #include <opencv2/opencv.hpp>
 
 #include "XRSLAM.h"
+#include "IO/semantic_ply_writer.h"
+#include "IO/dense_semantic_ply_writer.h"
 #include "opencv_painter.h"
 #include "visualizer.h"
 
@@ -78,6 +83,24 @@ int main(int argc, char *argv[]) {
         .help("Start playing immediately.")
         .default_value(false)
         .implicit_value(true);
+    program.add_argument("--dense-semantic-ply-prefix")
+        .help("Export depth-backed session-local voxel point clouds")
+        .nargs(1).default_value(std::string(""));
+    program.add_argument("--dense-semantic-stable-only")
+        .help("Export dense voxels only when 2+ views agree")
+        .default_value(false).implicit_value(true);
+    program.add_argument("--dense-semantic-label-colors")
+        .help("Color PLY vertices by Cityscapes semantic class, not RGB")
+        .default_value(false).implicit_value(true);
+    program.add_argument("--semantic-ply-prefix")
+        .help("Write a PLY per semantic VIO session (coordinates are session-local)")
+        .nargs(1).default_value(std::string(""));
+    program.add_argument("--semantic-ply-all")
+        .help("Include unstable semantic tracks (default: stable only)")
+        .default_value(false).implicit_value(true);
+    program.add_argument("--semantic-alignments")
+        .help("Optional explicit session_id yaw_deg tx ty tz alignment table")
+        .nargs(1).default_value(std::string(""));
     program.add_argument("--headless")
         .help("Disable LiteViz and exit when dataset processing completes.")
         .default_value(false)
@@ -97,6 +120,21 @@ int main(int argc, char *argv[]) {
     std::string global_tum_output =
         program.get<std::string>("--global-tum");
     headless = program.get<bool>("--headless");
+    const std::string dense_ply_prefix =
+        program.get<std::string>("--dense-semantic-ply-prefix");
+    const bool dense_stable_only =
+        program.get<bool>("--dense-semantic-stable-only");
+    const bool dense_label_colors =
+        program.get<bool>("--dense-semantic-label-colors");
+    const std::string semantic_ply_prefix =
+        program.get<std::string>("--semantic-ply-prefix");
+    const bool semantic_ply_all = program.get<bool>("--semantic-ply-all");
+    const std::string semantic_alignments_path =
+        program.get<std::string>("--semantic-alignments");
+    if (!semantic_alignments_path.empty() && semantic_ply_prefix.empty()) {
+        std::cerr << "--semantic-alignments requires --semantic-ply-prefix\n";
+        return EXIT_FAILURE;
+    }
     bool isRunning = program.get<bool>("-p") || headless;
 
     const std::string max_camera_frames_arg =
@@ -295,6 +333,111 @@ int main(int argc, char *argv[]) {
 
     while (viewer) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    if (!semantic_ply_prefix.empty()) {
+        if (!XRSLAMWaitForSemanticIdle()) {
+            std::cerr << "[SemanticMapExport] ERROR: semantics are not enabled\n";
+            XRSLAMDestroy();
+            return EXIT_FAILURE;
+        }
+        // Concurrent snapshots are value copies. Retry when the count grows
+        // between the sizing call and the copy; never truncate silently.
+        std::vector<XRSLAMSemanticMapPoint> semantic_points;
+        bool complete = false;
+        for (int attempt = 0; attempt < 4; ++attempt) {
+            size_t total = 0;
+            XRSLAMGetSemanticMapSnapshot(nullptr, 0, &total,
+                                         semantic_ply_all ? 0 : 1);
+            semantic_points.resize(total);
+            size_t observed_total = 0;
+            const size_t copied = XRSLAMGetSemanticMapSnapshot(
+                semantic_points.data(), semantic_points.size(), &observed_total,
+                semantic_ply_all ? 0 : 1);
+            if (copied == observed_total) {
+                semantic_points.resize(copied);
+                complete = true;
+                break;
+            }
+        }
+        if (!complete) {
+            std::cerr << "[SemanticMapExport] ERROR: snapshot changed during read\n";
+            XRSLAMDestroy();
+            return EXIT_FAILURE;
+        }
+        xrslam_pc_semantic::OutputAlignments alignments;
+        std::string error;
+        if (!semantic_alignments_path.empty() &&
+            !xrslam_pc_semantic::read_alignments(
+                semantic_alignments_path, alignments, error)) {
+            std::cerr << "[SemanticMapExport] ERROR: " << error << '\n';
+            XRSLAMDestroy();
+            return EXIT_FAILURE;
+        }
+        std::vector<std::string> written;
+        if (!xrslam_pc_semantic::write_ply_files(
+                semantic_ply_prefix, semantic_points,
+                semantic_alignments_path.empty() ? nullptr : &alignments,
+                written, error)) {
+            std::cerr << "[SemanticMapExport] ERROR: " << error << '\n';
+            XRSLAMDestroy();
+            return EXIT_FAILURE;
+        }
+        std::cerr << "[SemanticMapExport] event=complete points="
+                  << semantic_points.size() << " files=" << written.size()
+                  << " stable_only=" << (semantic_ply_all ? 0 : 1)
+                  << " aligned=" << (semantic_alignments_path.empty() ? 0 : 1)
+                  << " state_mutation=0\n";
+        for (const auto &path : written)
+            std::cerr << "[SemanticMapExport] event=file path=" << path << '\n';
+    }
+
+    if (!dense_ply_prefix.empty()) {
+        if (!XRSLAMWaitForSemanticIdle()) {
+            std::cerr << "[DenseSemanticExport] ERROR: semantics disabled\n";
+            XRSLAMDestroy();
+            return EXIT_FAILURE;
+        }
+        std::vector<XRSLAMDenseSemanticPoint> dense_points;
+        bool complete = false;
+        for (int attempt = 0; attempt < 4; ++attempt) {
+            size_t total = 0;
+            XRSLAMGetDenseSemanticMapSnapshot(nullptr, 0, &total,
+                                              dense_stable_only ? 1 : 0);
+            dense_points.resize(total);
+            size_t current = 0;
+            const size_t copied = XRSLAMGetDenseSemanticMapSnapshot(
+                dense_points.data(), dense_points.size(), &current,
+                dense_stable_only ? 1 : 0);
+            if (copied == current) {
+                dense_points.resize(copied);
+                complete = true;
+                break;
+            }
+        }
+        if (!complete || dense_points.empty()) {
+            std::cerr << "[DenseSemanticExport] ERROR: no dense voxel data "
+                         "(requires registered sensor-metric RGB-D frames)\n";
+            XRSLAMDestroy();
+            return EXIT_FAILURE;
+        }
+        const char *voxel_env = std::getenv("XRSLAM_DENSE_VOXEL_SIZE_M");
+        const double voxel_size = voxel_env ? std::stod(voxel_env) : 0.03;
+        std::vector<std::string> files;
+        std::string error;
+        if (!xrslam_pc_dense::write_ply_files(dense_ply_prefix, dense_points,
+                                               files, error, voxel_size,
+                                               dense_label_colors)) {
+            std::cerr << "[DenseSemanticExport] ERROR: " << error << '\n';
+            XRSLAMDestroy();
+            return EXIT_FAILURE;
+        }
+        std::cerr << "[DenseSemanticExport] event=complete points="
+                  << dense_points.size() << " files=" << files.size()
+                  << " stable_only=" << dense_stable_only
+                  << " state_mutation=0\n";
+        for (const auto &f : files)
+            std::cerr << "[DenseSemanticExport] event=file path=" << f << '\n';
     }
 
     XRSLAMDestroy();
