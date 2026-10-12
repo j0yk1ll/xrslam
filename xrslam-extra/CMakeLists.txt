@@ -16,9 +16,13 @@ endif()
 
 superbuild_depend(yaml-cpp)
 
-# The supported learned place descriptor is EigenPlaces (LibTorch).
-# XFeat/LighterGlue/ONNX Runtime are not part of this build.
-if(NOT XRSLAM_IOS AND XRSLAM_ENABLE_EIGENPLACES)
+# TorchScript inference backends are optional and depend on the same LibTorch.
+# No Torch dependency is introduced into xrslam-core or the default build.
+option(XRSLAM_ENABLE_PIDNET "Build the PIDNet semantic segmentation backend" OFF)
+if(XRSLAM_ENABLE_PIDNET AND XRSLAM_IOS)
+  message(FATAL_ERROR "PIDNet LibTorch backend is currently desktop-only")
+endif()
+if(NOT XRSLAM_IOS AND (XRSLAM_ENABLE_EIGENPLACES OR XRSLAM_ENABLE_PIDNET))
   find_package(Torch CONFIG REQUIRED)
 endif()
 
@@ -114,6 +118,31 @@ if(XRSLAM_ENABLE_EIGENPLACES AND NOT XRSLAM_IOS AND TARGET xrslam-extra-opencv-i
       xrslam-extra-eigenplaces
       depends::opencv
   )
+endif()
+
+if(XRSLAM_ENABLE_PIDNET)
+  if(NOT TARGET xrslam-extra-opencv-image)
+    message(FATAL_ERROR "XRSLAM_ENABLE_PIDNET requires the OpenCV image backend")
+  endif()
+  add_library(xrslam-extra-pidnet
+    ${XRSLAM_EXTRA_INCLUDE_DIR}/xrslam/extra/pidnet_segmenter.h
+    ${XRSLAM_EXTRA_SOURCE_DIR}/xrslam/extra/pidnet_segmenter.cpp
+  )
+  separate_arguments(XRSLAM_PIDNET_TORCH_CXX_FLAGS NATIVE_COMMAND "${TORCH_CXX_FLAGS}")
+  target_compile_features(xrslam-extra-pidnet PRIVATE cxx_std_20)
+  target_compile_options(xrslam-extra-pidnet PRIVATE ${XRSLAM_PIDNET_TORCH_CXX_FLAGS})
+  target_link_libraries(xrslam-extra-pidnet
+    PUBLIC
+      xrslam-extra-opencv-image
+    PRIVATE
+      ${TORCH_LIBRARIES}
+  )
+  add_executable(xrslam-pidnet-smoke
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools/pidnet_smoke.cpp
+  )
+  target_compile_features(xrslam-pidnet-smoke PRIVATE cxx_std_20)
+  target_link_libraries(xrslam-pidnet-smoke
+    PRIVATE xrslam-extra-pidnet depends::opencv)
 endif()
 
 set(XRSLAM_EXTRA_LIBRARY_DIR ${CMAKE_CURRENT_BINARY_DIR} CACHE INTERNAL "")
