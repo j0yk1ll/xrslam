@@ -13,8 +13,10 @@
 #include <tf2_ros/transform_broadcaster.h>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/LinearMath/Transform.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <yaml-cpp/yaml.h>
 #include <algorithm>
+#include <cstdlib>
 #include <chrono>
 #include <cstdint>
 #include <fstream>
@@ -69,6 +71,17 @@ public:
     base_frame_=declare_parameter<std::string>("base_frame","base_link");
     odom_frame_=declare_parameter<std::string>("odom_frame","odom");
     pose_validated_=declare_parameter<bool>("pose_convention_validated",false);
+    enable_map_tf_=declare_parameter<bool>("enable_map_tf",false);
+    map_frame_=declare_parameter<std::string>("map_frame","map");
+    map_id_=declare_parameter<std::string>("map_id","");
+    if(enable_map_tf_ && (map_id_.empty() || map_frame_.empty() ||
+       map_frame_==odom_frame_ || map_frame_==base_frame_))
+      throw std::runtime_error("enable_map_tf needs map_id and a distinct map_frame");
+    if(enable_map_tf_) {
+      const char *env_map_id=std::getenv("XRSLAM_MAP_ID");
+      if(!env_map_id || map_id_!=env_map_id)
+        throw std::runtime_error("map_id must equal XRSLAM_MAP_ID for this process");
+    }
     offset_=declare_parameter<double>("camera_imu_offset_sec",std::numeric_limits<double>::quiet_NaN());
     max_jump_=declare_parameter<double>("max_pose_step_m",1.0);
     max_angular_jump_=declare_parameter<double>("max_pose_step_rad",1.0);
@@ -80,6 +93,10 @@ public:
     auto latched=rclcpp::QoS(1).reliable().transient_local();
     status_pub_=create_publisher<std_msgs::msg::String>("/xrslam/tracking_status",latched);
     valid_pub_=create_publisher<std_msgs::msg::Bool>("/xrslam/localization_valid",latched);
+    map_valid_pub_=create_publisher<std_msgs::msg::Bool>(
+      "/xrslam/map_localization_valid",latched);
+    map_status_pub_=create_publisher<std_msgs::msg::String>(
+      "/xrslam/map_localization_status",latched);
     odom_pub_=create_publisher<nav_msgs::msg::Odometry>("/odom",rclcpp::QoS(10));
     pose_pub_=create_publisher<geometry_msgs::msg::PoseStamped>("/xrslam/pose",rclcpp::QoS(10));
     imu_sub_=create_subscription<sensor_msgs::msg::Imu>(imu_topic_,qos,
@@ -90,6 +107,7 @@ public:
       [this](sensor_msgs::msg::Image::ConstSharedPtr p){ image(p); });
     timer_=create_wall_timer(std::chrono::milliseconds(20),[this]{ poll(); });
     announce("waiting_calibration",false);
+    map_announce(enable_map_tf_ ? "waiting_calibration" : "disabled",false);
   }
   ~XrslamRos2() override {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -105,6 +123,36 @@ private:
     std_msgs::msg::String s;s.data=status;status_pub_->publish(s);
     std_msgs::msg::Bool b;b.data=valid;valid_pub_->publish(b);
   }
+  void map_announce(const std::string &status,bool valid) {
+    if(map_status_==status && map_valid_==valid)return;
+    map_status_=status;map_valid_=valid;
+    std_msgs::msg::String s;s.data=status;
+    map_status_pub_->publish(s);
+    std_msgs::msg::Bool b;b.data=valid;
+    map_valid_pub_->publish(b);
+  }
+
+  bool read_verified_map_alignment(XRSLAMVerifiedMapAlignment &alignment) {
+    alignment={};
+    if(!enable_map_tf_)return false;
+    if(!XRSLAMGetVerifiedMapAlignment(&alignment)) {
+      map_announce("xrslam_map_api_unavailable",false);return false;
+    }
+    if(map_id_!=std::string(alignment.map_id)) {
+      map_announce("map_identity_mismatch",false);return false;
+    }
+    if(!alignment.valid) {
+      map_announce("waiting_verified_map_alignment",false);return false;
+    }
+    if(!finite(alignment.verified_timestamp) ||
+       !finite(alignment.yaw_rad) || std::abs(alignment.yaw_rad)>6.283186) {
+      map_announce("invalid_map_alignment",false);return false;
+    }
+    for(double v:alignment.translation)
+      if(!finite(v)){map_announce("invalid_map_alignment",false);return false;}
+    return true;
+  }
+
   bool init_locked() {
     if(initialized_||!info_)return initialized_;
     geometry_msgs::msg::TransformStamped body_imu,body_cam;
@@ -259,7 +307,18 @@ private:
     XRSLAMState state=XRSLAM_STATE_INITIALIZING;
     XRSLAMGetResult(XRSLAM_RESULT_STATE,&state);
     if(state==XRSLAM_STATE_TRACKING_FAIL){fail("tracking_lost");return;}
-    if(state!=XRSLAM_STATE_TRACKING_SUCCESS){announce("initializing",false);return;}
+    if(state!=XRSLAM_STATE_TRACKING_SUCCESS){
+      if(last_pose_time_>0){fail("tracking_session_reset");return;}
+      announce("initializing",false);
+      map_announce(enable_map_tf_?"waiting_tracking":"disabled",false);
+      return;
+    }
+    XRSLAMVerifiedMapAlignment map_alignment{};
+    const bool map_ready=read_verified_map_alignment(map_alignment);
+    if(last_pose_time_>0 && enable_map_tf_ &&
+       prior_map_epoch_!=0 && map_alignment.tracking_session_epoch!=prior_map_epoch_) {
+      fail("map_tracking_epoch_changed");return;
+    }
     XRSLAMPose p{};
     XRSLAMGetResult(XRSLAM_RESULT_BODY_POSE,&p);
     const double qnorm=p.quaternion[0]*p.quaternion[0]+p.quaternion[1]*p.quaternion[1]+
@@ -267,7 +326,11 @@ private:
     if(p.timestamp<=0||!finite(p.timestamp)||qnorm<0.99||qnorm>1.01||
        !finite(p.translation[0])||!finite(p.translation[1])||!finite(p.translation[2]))return;
     if(p.timestamp<=last_pose_time_)return;
-    if(!pose_validated_) {announce("pose_convention_unverified",false);return;}
+    if(!pose_validated_) {
+      announce("pose_convention_unverified",false);
+      map_announce("pose_convention_unverified",false);
+      return;
+    }
     const rclcpp::Time stamp(static_cast<int64_t>(std::llround(p.timestamp*1e9)),RCL_ROS_TIME);
     geometry_msgs::msg::Pose pose;
     pose.position.x=p.translation[0];pose.position.y=p.translation[1];pose.position.z=p.translation[2];
@@ -326,11 +389,50 @@ private:
     tf_broadcaster_.sendTransform(tf);
     last_pose_time_=p.timestamp;last_pose_=pose;
     announce("tracking",true);
+    if(map_ready) {
+      // Compare the status for the same source session again immediately
+      // before publishing the corresponding dynamic transform.
+      XRSLAMVerifiedMapAlignment second{};
+      const bool confirmed=read_verified_map_alignment(second);
+      if(confirmed &&
+         second.tracking_session_epoch==map_alignment.tracking_session_epoch &&
+         second.reference_session_id==map_alignment.reference_session_id &&
+         second.verified_timestamp<=p.timestamp+1e-6) {
+        // T_map_odom = T_map_vio * T_vio_base * inverse(T_odom_base).
+        // Here the adapter's T_odom_base is the same local body pose,
+        // but retain the composition to document and test frame direction.
+        tf2::Quaternion vio_q(pose.orientation.x,pose.orientation.y,
+                              pose.orientation.z,pose.orientation.w);
+        vio_q.normalize();
+        const tf2::Vector3 vio_xyz(pose.position.x,pose.position.y,pose.position.z);
+        const tf2::Transform T_vio_base(vio_q,vio_xyz);
+        const tf2::Transform T_odom_base(vio_q,vio_xyz);
+        tf2::Quaternion map_q(tf2::Vector3(0,0,1),second.yaw_rad);
+        const tf2::Transform T_map_vio(
+          map_q,tf2::Vector3(second.translation[0],second.translation[1],
+                            second.translation[2]));
+        const tf2::Transform T_map_odom =
+          T_map_vio*T_vio_base*T_odom_base.inverse();
+        geometry_msgs::msg::TransformStamped global_tf;
+        global_tf.header.stamp=stamp;
+        global_tf.header.frame_id=map_frame_;
+        global_tf.child_frame_id=odom_frame_;
+        global_tf.transform=tf2::toMsg(T_map_odom);
+        tf_broadcaster_.sendTransform(global_tf);
+        prior_map_epoch_=second.tracking_session_epoch;
+        map_announce("verified:"+map_id_,true);
+      }else{
+        map_announce("map_alignment_changed_or_not_current",false);
+      }
+    }else if(enable_map_tf_){
+      map_announce("waiting_verified_map_alignment",false);
+    }
   }
   void fail(const std::string & reason) {
     if(failed_)return;
     failed_=true;pending_.clear();
     announce(reason,false);
+    map_announce(reason,false);
     RCLCPP_ERROR(get_logger(),"Odometry inhibited: %s (restart requires supervised validation)",reason.c_str());
   }
 
@@ -345,13 +447,18 @@ private:
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pose_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr valid_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr map_valid_pub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr map_status_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
   std::optional<sensor_msgs::msg::CameraInfo> info_;
   std::deque<sensor_msgs::msg::Image::ConstSharedPtr> pending_;
   std::string slam_yaml_,template_yaml_,image_topic_,info_topic_,imu_topic_;
   std::string camera_frame_,imu_frame_,base_frame_,odom_frame_,generated_yaml_;
+  std::string map_frame_,map_id_,map_status_;
   std::string last_status_;
   bool last_valid_=false,initialized_=false,failed_=false,pose_validated_=false;
+  bool enable_map_tf_=false,map_valid_=false;
+  std::uint64_t prior_map_epoch_=0;
   double offset_=0,max_jump_=1,max_angular_jump_=1;
   double last_imu_time_=-1,last_image_time_=-1,last_pose_time_=-1;
   geometry_msgs::msg::Pose last_pose_;

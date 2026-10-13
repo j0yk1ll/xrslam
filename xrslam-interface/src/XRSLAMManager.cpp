@@ -505,6 +505,23 @@ void XRSLAMManager::GetResultBodyPose(XRSLAMPose *pose) const {
     pose->quaternion[3] = body_pose.q.w();
 }
 
+bool XRSLAMManager::GetVerifiedMapAlignment(
+    XRSLAMVerifiedMapAlignment *out) const {
+    if (!out || !detail_) return false;
+    *out = {};
+    const auto s = detail_->get_verified_map_localization();
+    out->valid = s.valid ? 1 : 0;
+    out->reference_map_loaded = s.reference_map_loaded ? 1 : 0;
+    out->tracking_session_epoch = s.tracking_session_epoch;
+    out->reference_session_id = s.reference_session_id;
+    out->verified_timestamp = s.verified_timestamp;
+    out->yaw_rad = s.T_map_vio.yaw_rad;
+    for (int i=0;i<3;++i)
+        out->translation[i] = s.T_map_vio.translation[i];
+    std::snprintf(out->map_id,sizeof(out->map_id),"%s",s.map_id.c_str());
+    return true;
+}
+
 void XRSLAMManager::GetResultGlobalBodyPose(XRSLAMPose *pose) const {
     // Copy the existing body output; never mutate the estimator/local result.
     GetResultBodyPose(pose);

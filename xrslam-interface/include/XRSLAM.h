@@ -323,6 +323,25 @@ size_t XRSLAMQuerySemanticKeyframes(
     double min_pixel_coverage, size_t max_results,
     XRSLAMSemanticKeyframeHit *dst, size_t capacity, size_t *total);
 
+/* Separate from GLOBAL_BODY_POSE and its local-pose fallback.
+ * This exposes T_map_vio, NOT T_map_odom. A return of 1 means an XRSLAM
+ * instance exists; the valid field is the ONLY localization authority.
+ * valid=0 must never be interpreted as identity. Do not call concurrently
+ * with XRSLAMDestroy. map_id is stable identity, not a TF frame name.
+ */
+typedef struct XRSLAMVerifiedMapAlignment {
+    int valid;
+    int reference_map_loaded;
+    uint64_t tracking_session_epoch;
+    uint64_t reference_session_id;
+    double verified_timestamp;
+    double yaw_rad;
+    double translation[3];
+    char map_id[128];
+} XRSLAMVerifiedMapAlignment;
+
+int XRSLAMGetVerifiedMapAlignment(XRSLAMVerifiedMapAlignment *out);
+
 /**
  * @brief destroy SLAM system
  */

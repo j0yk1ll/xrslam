@@ -2,6 +2,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
+#include <algorithm>
+#include <cstdint>
 #include <optional>
 #include <xrslam/core/persistent_relocalization_map_io.h>
 #include <filesystem>
@@ -38,7 +40,13 @@ FrontendWorker::FrontendWorker(XRSLAM::Detail *detail,
             throw std::runtime_error("XRSLAM_MAP_ID required for persistent references");
         reference_map_path_ = path;
         reference_map_identity_ = identity;
-        if (std::filesystem::exists(reference_map_path_)) {
+        map_localization_.map_id = reference_map_identity_;
+        const char *map_create = std::getenv("XRSLAM_MAP_CREATE");
+        allow_create_map_origin_ = map_create && std::string(map_create) == "1";
+        const bool existing = std::filesystem::exists(reference_map_path_);
+        map_origin_exists_ = existing;
+        map_localization_.reference_map_loaded = existing;
+        if (existing) {
             std::string error;
             if (!load_relocalization_map(persistent_relocalization_map_,
                                          reference_map_path_,
@@ -59,6 +67,12 @@ FrontendWorker::FrontendWorker(XRSLAM::Detail *detail,
 
 FrontendWorker::~FrontendWorker() = default;
 
+VerifiedMapLocalization FrontendWorker::get_verified_map_localization() const {
+    std::unique_lock lk(latest_state_mutex);
+    return map_localization_;
+}
+
+
 void FrontendWorker::index_loaded_references(PlaceDatabase &database) const {
     for (const auto &session : persistent_relocalization_map_.sessions()) {
         for (const auto &place : session.places.entries()) {
@@ -73,8 +87,12 @@ void FrontendWorker::save_reference_map_after_stop() {
     if (reference_map_path_.empty()) return;
     if (sliding_window_tracker) {
         auto reference = sliding_window_tracker->take_relocalization_reference();
+        std::unique_lock lk(latest_state_mutex);
         if (global_drift_available_)
             reference.global_alignment = global_drift_snapshot_;
+        if (map_localization_.valid)
+            reference.map_alignment = map_localization_.T_map_vio;
+        lk.unlock();
         persistent_relocalization_map_.capture(std::move(reference));
     }
     std::string error;
@@ -260,6 +278,34 @@ void FrontendWorker::work(std::unique_lock<std::mutex> &l) {
             latest_state = {t, pending_frame_id, pose, motion};
             global_drift_available_ = false;
             relocalization_global_alignment_active_ = false;
+            // A new VIO session gets a new epoch; never carry a map->odom
+            // correction across an unknown session-origin transition.
+            map_localization_.valid = false;
+            map_localization_.verified_timestamp = 0.0;
+            map_localization_.reference_session_id = 0;
+            ++map_localization_.tracking_session_epoch;
+            pending_recovered_map_alignment_.reset();
+            if (relocalization_bootstrap_tracking_) {
+                // PnP consensus and the first bootstrap update are necessary,
+                // not sufficient. Wait for the subsequent visual-track gate.
+                pending_recovered_map_alignment_ =
+                    persistent_relocalization_map_.map_alignment_for_session(
+                        relocalization_active_reference_session_id_);
+            } else if (allow_create_map_origin_ && !map_origin_exists_ &&
+                       persistent_relocalization_map_.session_count() == 0) {
+                // Deliberately DEFINE a brand-new map's coordinates using
+                // this first initialized VIO frame. Not a claim of
+                // localization against an existing historical map.
+                map_origin_exists_ = true;
+                map_localization_.T_map_vio = PersistentMapAlignment{};
+                map_localization_.verified_timestamp = t;
+                map_localization_.valid = true;
+                std::fprintf(stderr,
+                    "[PersistentMapFrame] event=origin_created id=%s epoch=%llu t=%.9f\n",
+                    reference_map_identity_.c_str(),
+                    static_cast<unsigned long long>(
+                        map_localization_.tracking_session_epoch),t);
+            }
             if (relocalization_bootstrap_tracking_) {
                 const auto saved_alignment =
                     persistent_relocalization_map_.global_alignment_for_session(
@@ -392,11 +438,31 @@ void FrontendWorker::work(std::unique_lock<std::mutex> &l) {
                     visual_tracks, good ? 1 : 0,
                     last->image ? last->image->t : 0.0);
                 if (relocalization_bootstrap_steps_ == 20) {
+                    const bool sustained =
+                        relocalization_bootstrap_good_steps_ >= 15;
                     std::fprintf(stderr,
                         "[RelocalizationBootstrap] event=followup "
                         "steps=20 good_steps=%zu sustained=%d\n",
                         relocalization_bootstrap_good_steps_,
-                        relocalization_bootstrap_good_steps_ >= 15 ? 1 : 0);
+                        sustained ? 1 : 0);
+                    if (sustained && pending_recovered_map_alignment_ &&
+                        last->image && std::isfinite(last->image->t)) {
+                        std::unique_lock lk(latest_state_mutex);
+                        map_localization_.T_map_vio =
+                            *pending_recovered_map_alignment_;
+                        map_localization_.reference_session_id =
+                            relocalization_active_reference_session_id_;
+                        map_localization_.verified_timestamp = last->image->t;
+                        map_localization_.valid = true;
+                        std::fprintf(stderr,
+                            "[PersistentMapFrame] event=verified_recovery "
+                            "reference_session=%zu epoch=%llu t=%.9f\n",
+                            relocalization_active_reference_session_id_,
+                            static_cast<unsigned long long>(
+                                map_localization_.tracking_session_epoch),
+                            last->image->t);
+                    }
+                    pending_recovered_map_alignment_.reset();
                 }
             }
 #if defined(XRSLAM_IOS)
@@ -441,6 +507,16 @@ void FrontendWorker::work(std::unique_lock<std::mutex> &l) {
             relocalization_active_reference_session_id_ = 0;
             relocalization_bootstrap_steps_ = 0;
             relocalization_bootstrap_good_steps_ = 0;
+            // Invalidate map localization BEFORE releasing the old tracker.
+            // The adapter must stop map->odom immediately on the next poll.
+            std::optional<PersistentMapAlignment> lost_map_alignment;
+            {
+                std::unique_lock lk(latest_state_mutex);
+                if (map_localization_.valid)
+                    lost_map_alignment = map_localization_.T_map_vio;
+                map_localization_.valid = false;
+            }
+            pending_recovered_map_alignment_.reset();
             // The correction at the time of loss maps THIS session's local
             // archive coordinates to the same global output frame as the
             // last published pose. It must not be exposed during loss.
@@ -458,6 +534,7 @@ void FrontendWorker::work(std::unique_lock<std::mutex> &l) {
             auto reference =
                 sliding_window_tracker->take_relocalization_reference();
             reference.global_alignment = lost_alignment;
+            reference.map_alignment = lost_map_alignment;
             const size_t archived = reference.archive.size();
             const size_t places = reference.places.size();
             const bool captured =

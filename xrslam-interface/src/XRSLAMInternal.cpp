@@ -59,6 +59,10 @@ void XRSLAMPushSensorData(XRSLAMSensorType sensor_type, // sensor type
 
 void XRSLAMRunOneFrame() { xrslam::XRSLAMManager::Instance().RunOneFrame(); }
 
+int XRSLAMGetVerifiedMapAlignment(XRSLAMVerifiedMapAlignment *out) {
+    return xrslam::XRSLAMManager::Instance().GetVerifiedMapAlignment(out) ? 1 : 0;
+}
+
 void XRSLAMGetResult(XRSLAMResultType result_type, // result type
                      void *result_data             // result data
 ) {
