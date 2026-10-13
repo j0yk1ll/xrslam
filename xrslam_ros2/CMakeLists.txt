@@ -36,7 +36,7 @@ endif()
 add_executable(xrslam_ros2_node src/xrslam_ros2_node.cpp)
 target_include_directories(xrslam_ros2_node PRIVATE
   "${XRSLAM_ROOT}/xrslam-interface/include")
-target_link_libraries(xrslam_ros2_node PRIVATE "${XRSLAM_LIBRARY}" yaml-cpp)
+target_link_libraries(xrslam_ros2_node "${XRSLAM_LIBRARY}" yaml-cpp)
 ament_target_dependencies(xrslam_ros2_node
   rclcpp sensor_msgs nav_msgs geometry_msgs std_msgs tf2 tf2_ros tf2_geometry_msgs)
 target_compile_options(xrslam_ros2_node PRIVATE -Wall -Wextra -Wpedantic)

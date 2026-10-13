@@ -9,6 +9,7 @@
 #include <stddef.h>
 
 #ifdef __cplusplus
+#include <vector>
 extern "C" {
 #endif
 

@@ -1,5 +1,6 @@
 #include "XRSLAMManager.h"
 
+#include <xrslam/core/frontend_worker.h>
 #include <xrslam/core/place_graph_4dof_shadow.h>
 #include <xrslam/place_recognition.h>
 #include <xrslam/extra/orb_local_descriptor_extractor.h>

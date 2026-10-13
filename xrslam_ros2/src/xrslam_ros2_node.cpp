@@ -37,10 +37,10 @@ namespace {
 double seconds(const builtin_interfaces::msg::Time & stamp) {
   return rclcpp::Time(stamp).seconds();
 }
-bool finite(double x) { return std::isfinite(x); }
+bool is_finite_value(double x) { return std::isfinite(x); }
 bool valid_quat(const geometry_msgs::msg::Quaternion & q) {
   const double n=q.x*q.x+q.y*q.y+q.z*q.z+q.w*q.w;
-  return finite(n) && std::abs(n-1.0)<1e-3;
+  return is_finite_value(n) && std::abs(n-1.0)<1e-3;
 }
 YAML::Node vec3(const geometry_msgs::msg::Vector3 & p) {
   YAML::Node n(YAML::NodeType::Sequence);
@@ -86,7 +86,7 @@ public:
     max_jump_=declare_parameter<double>("max_pose_step_m",1.0);
     max_angular_jump_=declare_parameter<double>("max_pose_step_rad",1.0);
     if(slam_yaml_.empty()||template_yaml_.empty()||image_topic_.empty()||
-       info_topic_.empty()||camera_frame_.empty()||!finite(offset_)) {
+       info_topic_.empty()||camera_frame_.empty()||!is_finite_value(offset_)) {
       throw std::runtime_error("Configure SLAM YAML, calibrated device template, image/CameraInfo topics, camera frame and measured camera-IMU offset");
     }
     auto qos=rclcpp::SensorDataQoS();
@@ -144,12 +144,12 @@ private:
     if(!alignment.valid) {
       map_announce("waiting_verified_map_alignment",false);return false;
     }
-    if(!finite(alignment.verified_timestamp) ||
-       !finite(alignment.yaw_rad) || std::abs(alignment.yaw_rad)>6.283186) {
+    if(!is_finite_value(alignment.verified_timestamp) ||
+       !is_finite_value(alignment.yaw_rad) || std::abs(alignment.yaw_rad)>6.283186) {
       map_announce("invalid_map_alignment",false);return false;
     }
     for(double v:alignment.translation)
-      if(!finite(v)){map_announce("invalid_map_alignment",false);return false;}
+      if(!is_finite_value(v)){map_announce("invalid_map_alignment",false);return false;}
     return true;
   }
 
@@ -213,15 +213,15 @@ private:
     std::lock_guard<std::mutex> lock(mutex_);
     if(initialized_)return;
     if(c.header.frame_id!=camera_frame_ || c.width==0 || c.height==0 ||
-       !finite(c.p[0])||!finite(c.p[5]))return;
+       !is_finite_value(c.p[0])||!is_finite_value(c.p[5]))return;
     info_=c;
   }
   void imu(const sensor_msgs::msg::Imu & m) {
     std::lock_guard<std::mutex> lock(mutex_);
     const double t=seconds(m.header.stamp);
     if(m.header.frame_id!=imu_frame_||t<=0||
-       !finite(m.angular_velocity.x)||!finite(m.angular_velocity.y)||!finite(m.angular_velocity.z)||
-       !finite(m.linear_acceleration.x)||!finite(m.linear_acceleration.y)||!finite(m.linear_acceleration.z))return;
+       !is_finite_value(m.angular_velocity.x)||!is_finite_value(m.angular_velocity.y)||!is_finite_value(m.angular_velocity.z)||
+       !is_finite_value(m.linear_acceleration.x)||!is_finite_value(m.linear_acceleration.y)||!is_finite_value(m.linear_acceleration.z))return;
     if(last_imu_time_>0 && t<=last_imu_time_) {
       if(t<last_imu_time_-0.1) fail("imu_clock_discontinuity");
       return;
@@ -323,8 +323,8 @@ private:
     XRSLAMGetResult(XRSLAM_RESULT_BODY_POSE,&p);
     const double qnorm=p.quaternion[0]*p.quaternion[0]+p.quaternion[1]*p.quaternion[1]+
       p.quaternion[2]*p.quaternion[2]+p.quaternion[3]*p.quaternion[3];
-    if(p.timestamp<=0||!finite(p.timestamp)||qnorm<0.99||qnorm>1.01||
-       !finite(p.translation[0])||!finite(p.translation[1])||!finite(p.translation[2]))return;
+    if(p.timestamp<=0||!is_finite_value(p.timestamp)||qnorm<0.99||qnorm>1.01||
+       !is_finite_value(p.translation[0])||!is_finite_value(p.translation[1])||!is_finite_value(p.translation[2]))return;
     if(p.timestamp<=last_pose_time_)return;
     if(!pose_validated_) {
       announce("pose_convention_unverified",false);
