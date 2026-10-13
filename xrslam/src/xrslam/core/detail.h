@@ -3,6 +3,7 @@
 
 #include <xrslam/common.h>
 #include <xrslam/xrslam.h>
+#include <xrslam/place_recognition.h>
 #include <mutex>
 #include <utility>
 namespace xrslam {
@@ -42,6 +43,10 @@ struct XRSLAM::Detail {
 
     void set_place_database(std::shared_ptr<PlaceDatabase> database);
     PlaceDatabase *place_database() const;
+
+    // Preserves existing in-process frame keys when no disk map is loaded.
+    // After restore, reserves disjoint keys for the new VIO process.
+    PlaceKey place_key_for_frame(size_t frame_id) const;
 
     void set_local_descriptor_extractor(
         std::shared_ptr<LocalDescriptorExtractor> extractor);
@@ -98,6 +103,7 @@ struct XRSLAM::Detail {
     std::deque<std::unique_ptr<Frame>> frames;
     std::deque<ImuData> frontal_imus;
 
+    PlaceKey place_key_offset_ = 0;
     std::shared_ptr<PlaceDatabase> place_database_;
     std::shared_ptr<PlaceDescriptorExtractor> place_descriptor_extractor_;
     std::shared_ptr<LocalDescriptorExtractor> local_descriptor_extractor_;
