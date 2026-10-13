@@ -16,7 +16,7 @@ namespace {
 // Version 1: explicit byte order, float IEEE-754, bounded collections,
 // FNV-1a corruption check, retained session/map frame provenance.
 constexpr char MAGIC[8] = {'X','R','S','L','A','M','M','P'};
-constexpr std::uint32_t VERSION = 1;
+constexpr std::uint32_t VERSION = 2; // v1 still readable, but has no map alignment
 constexpr std::size_t MAX_FILE = 512u * 1024u * 1024u;
 constexpr std::uint64_t MAX_SESSIONS = 10000;
 constexpr std::uint64_t MAX_KEYFRAMES = 2000000;
@@ -117,6 +117,12 @@ void write_session(Writer &w,const RelocalizationReferenceSession &s){
         w.u64(a.frame_id);w.f64(a.timestamp);w.f64(a.yaw_deg);
         for(int i=0;i<3;++i)w.f64(a.translation[i]);
     }
+    w.u8(s.map_alignment ? 1 : 0);
+    if (s.map_alignment) {
+        w.f64(s.map_alignment->yaw_rad);
+        for (int i = 0; i < 3; ++i)
+            w.f64(s.map_alignment->translation[i]);
+    }
     w.u64(s.archive.size());
     for(std::size_t frame_id:s.archive.insertion_order()){
         const auto *kf=s.archive.get(frame_id);
@@ -157,7 +163,7 @@ void write_session(Writer &w,const RelocalizationReferenceSession &s){
         for(float f:p.descriptor.values)w.f32(f);
     }
 }
-RelocalizationReferenceSession read_session(Reader &r) {
+RelocalizationReferenceSession read_session(Reader &r,std::uint32_t version) {
     RelocalizationReferenceSession s;
     s.session_id=static_cast<size_t>(r.u64());
     s.semantic_tracking_session_id=r.u64();
@@ -167,6 +173,14 @@ RelocalizationReferenceSession read_session(Reader &r) {
         a.timestamp=r.f64();a.yaw_deg=r.f64();
         for(int i=0;i<3;++i)a.translation[i]=r.f64();
         s.global_alignment=a;
+    }
+    if (version >= 2 && r.u8()) {
+        PersistentMapAlignment alignment;
+        alignment.yaw_rad=r.f64();
+        if (std::abs(alignment.yaw_rad)>6.283185307179586)
+            throw std::runtime_error("invalid saved map yaw");
+        for (int i=0;i<3;++i) alignment.translation[i]=r.f64();
+        s.map_alignment=alignment;
     }
     for(auto i=r.count(MAX_KEYFRAMES);i>0;--i){
         ArchivedKeyframe kf;
@@ -260,7 +274,9 @@ bool load_relocalization_map(PersistentRelocalizationMap &map,
         Reader r(bytes,bytes.size()-8);
         for(char c:MAGIC)if(r.u8()!=static_cast<std::uint8_t>(c))
             throw std::runtime_error("unknown map archive magic");
-        if(r.u32()!=VERSION)throw std::runtime_error("unsupported map archive version");
+        const auto version=r.u32();
+        if (version!=1 && version!=VERSION)
+            throw std::runtime_error("unsupported map archive version");
         if(r.str()!=identity)throw std::runtime_error("map identity mismatch");
         Reader trailer(bytes,bytes.size());trailer.at=bytes.size()-8;
         if(checksum(bytes,bytes.size()-8)!=trailer.u64())
@@ -268,7 +284,7 @@ bool load_relocalization_map(PersistentRelocalizationMap &map,
         PersistentRelocalizationMap restored;
         std::unordered_set<PlaceKey> keys;
         for(auto i=r.count(MAX_SESSIONS);i>0;--i){
-            auto session=read_session(r);
+            auto session=read_session(r,version);
             for(const auto &p:session.places.entries())
                 if(!keys.emplace(p.key).second)
                     throw std::runtime_error("duplicate place keys across sessions");

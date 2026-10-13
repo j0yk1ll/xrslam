@@ -17,6 +17,14 @@ namespace xrslam {
 // One finished tracking session, in that session's local world frame.
 // Old and new session coordinates must NOT be treated as interchangeable
 // until a future relocalization stage establishes an explicit transform.
+// One explicit 4-DoF transform T_map_session: p_map = Rz(yaw)*p_session + t.
+// Unlike place-graph output correction, this transform has a persistent
+// map-frame provenance. A missing value MUST NOT mean identity localization.
+struct PersistentMapAlignment {
+    double yaw_rad = 0.0;
+    vector<3> translation = vector<3>::Zero();
+};
+
 struct RelocalizationReferenceSession {
     size_t session_id = 0;
     // Identity of the active VIO session when the reference was captured.
@@ -27,6 +35,9 @@ struct RelocalizationReferenceSession {
     // Transform from this session's local map frame into the output-global
     // frame at capture time. This is a value snapshot, not a live graph edge.
     std::optional<PlaceGraph4DoFCorrection> global_alignment;
+    // Valid only when created as the defining map origin or when its source
+    // session has been geometrically relocalized and verified.
+    std::optional<PersistentMapAlignment> map_alignment;
 };
 
 struct RelocalizationReferenceMatch {
@@ -82,6 +93,13 @@ class PersistentRelocalizationMap {
             for (const auto &p : s.places.entries())
                 result = std::max(result, p.key);
         return result;
+    }
+
+    std::optional<PersistentMapAlignment> map_alignment_for_session(
+        size_t session_id) const {
+        for (const auto &s : sessions_)
+            if (s.session_id == session_id) return s.map_alignment;
+        return std::nullopt;
     }
 
     size_t session_count() const { return sessions_.size(); }

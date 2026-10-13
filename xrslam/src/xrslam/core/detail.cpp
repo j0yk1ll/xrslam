@@ -325,6 +325,10 @@ std::tuple<double, Pose> XRSLAM::Detail::get_latest_pose() {
     return {latest_timestamp_, latest_pose_};
 }
 
+VerifiedMapLocalization XRSLAM::Detail::get_verified_map_localization() const {
+    return frontend->get_verified_map_localization();
+}
+
 bool XRSLAM::Detail::get_latest_global_correction(
     PlaceGraph4DoFCorrection &correction) const {
     return frontend->get_latest_global_correction(correction);

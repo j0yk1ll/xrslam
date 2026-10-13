@@ -17,6 +17,18 @@ class Initializer;
 class SlidingWindowTracker;
 class Localizer;
 
+// The only publishable local-VIO -> stable-persistent-map alignment.
+// Protected by latest_state_mutex; invalid is NOT an identity transform.
+struct VerifiedMapLocalization {
+    bool valid = false;
+    bool reference_map_loaded = false;
+    std::uint64_t tracking_session_epoch = 0;
+    std::uint64_t reference_session_id = 0;
+    double verified_timestamp = 0.0;
+    PersistentMapAlignment T_map_vio;
+    std::string map_id;
+};
+
 class FrontendWorker : public Worker {
   public:
     FrontendWorker(XRSLAM::Detail *detail, std::shared_ptr<Config> config);
@@ -47,6 +59,10 @@ class FrontendWorker : public Worker {
     PlaceKey max_saved_place_key() const {
         return persistent_relocalization_map_.max_place_key();
     }
+
+    // Read-only coherent validity/alignment snapshot. No correction is
+    // derived from XRSLAM_RESULT_GLOBAL_BODY_POSE fallback.
+    VerifiedMapLocalization get_verified_map_localization() const;
 
     SysState get_system_state() const;
 
@@ -87,6 +103,12 @@ class FrontendWorker : public Worker {
     PersistentRelocalizationMap persistent_relocalization_map_;
     std::string reference_map_path_;
     std::string reference_map_identity_;
+    bool allow_create_map_origin_ = false;
+    bool map_origin_exists_ = false;
+
+    // Only the frontend worker mutates these; readers hold latest_state_mutex.
+    VerifiedMapLocalization map_localization_;
+    std::optional<PersistentMapAlignment> pending_recovered_map_alignment_;
     // Active tracking-session IDs must be allocated at initialization,
     // not after loss when the historical map captures a session.
     std::uint64_t next_semantic_tracking_session_id_ = 0;

@@ -47,6 +47,7 @@ class XRSLAMManager {
     void GetResultCameraPose(XRSLAMPose *pose) const;
     void GetResultBodyPose(XRSLAMPose *pose) const;
     void GetResultGlobalBodyPose(XRSLAMPose *pose) const;
+    bool GetVerifiedMapAlignment(XRSLAMVerifiedMapAlignment *out) const;
     void GetResultState(XRSLAMState *state) const;
     void GetResultLandmarks(XRSLAMLandmarks *landmarks) const;
     void GetResultFeatures(XRSLAMFeatures *features) const;

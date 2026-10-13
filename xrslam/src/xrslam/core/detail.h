@@ -20,6 +20,7 @@ class PlaceDatabase;
 class Synchronizer;
 class SemanticKeyframeSink;
 struct PlaceGraph4DoFCorrection;
+struct VerifiedMapLocalization;
 
 struct XRSLAM::Detail {
     struct GyroscopeData {
@@ -63,6 +64,7 @@ struct XRSLAM::Detail {
     // Returns a coherent graph correction snapshot, if available.
     bool get_latest_global_correction(
         PlaceGraph4DoFCorrection &correction) const;
+    VerifiedMapLocalization get_verified_map_localization() const;
 
     void set_semantic_keyframe_sink(
         std::shared_ptr<SemanticKeyframeSink> sink) {
