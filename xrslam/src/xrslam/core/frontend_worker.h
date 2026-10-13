@@ -40,6 +40,14 @@ class FrontendWorker : public Worker {
     const PersistentRelocalizationMap &relocalization_reference_map() const {
         return persistent_relocalization_map_;
     }
+    // Called only after worker stop (or during construction before start).
+    // Never take live worker-owned map snapshots from a ROS callback.
+    void save_reference_map_after_stop();
+    void index_loaded_references(PlaceDatabase &database) const;
+    PlaceKey max_saved_place_key() const {
+        return persistent_relocalization_map_.max_place_key();
+    }
+
     SysState get_system_state() const;
 
     bool global_localization_state() const;
@@ -77,6 +85,8 @@ class FrontendWorker : public Worker {
     // Retained across SlidingWindowTracker destruction. Each capture keeps
     // its own world-frame identity and never feeds the frozen place graph.
     PersistentRelocalizationMap persistent_relocalization_map_;
+    std::string reference_map_path_;
+    std::string reference_map_identity_;
     // Active tracking-session IDs must be allocated at initialization,
     // not after loss when the historical map captures a session.
     std::uint64_t next_semantic_tracking_session_id_ = 0;

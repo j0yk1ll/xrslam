@@ -13,6 +13,8 @@
 #include <xrslam/place_recognition.h>
 
 #include <cstdlib>
+#include <limits>
+#include <stdexcept>
 
 namespace xrslam {
 
@@ -43,6 +45,7 @@ XRSLAM::Detail::Detail(std::shared_ptr<Config> config) : config(config) {
 XRSLAM::Detail::~Detail() {
     feature_tracker->stop();
     frontend->stop();
+    frontend->save_reference_map_after_stop();
 }
 
 const Config *XRSLAM::Detail::configurations() const { return config.get(); }
@@ -59,7 +62,22 @@ XRSLAM::Detail::place_descriptor_extractor() const {
 
 void XRSLAM::Detail::set_place_database(
     std::shared_ptr<PlaceDatabase> database) {
+    if (database) {
+        const auto highest = frontend->max_saved_place_key();
+        if (frontend->relocalization_reference_map().place_keyframe_count() != 0) {
+            if (highest == std::numeric_limits<PlaceKey>::max())
+                throw std::runtime_error("persistent place-key namespace exhausted");
+            place_key_offset_ = highest + 1;
+            frontend->index_loaded_references(*database);
+        }
+    }
     place_database_ = std::move(database);
+}
+
+PlaceKey XRSLAM::Detail::place_key_for_frame(size_t id) const {
+    if (id > std::numeric_limits<PlaceKey>::max()-place_key_offset_)
+        throw std::runtime_error("place-key overflow");
+    return place_key_offset_ + static_cast<PlaceKey>(id);
 }
 
 PlaceDatabase *XRSLAM::Detail::place_database() const {

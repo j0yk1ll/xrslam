@@ -16,15 +16,19 @@ PidNetSemanticWorker::PidNetSemanticWorker(
     std::uint32_t classes, int canvas_width, int canvas_height,
     std::string taxonomy, std::string dump_dir, std::size_t max_pending,
     bool enable_dense, double dense_voxel_size_m, int dense_pixel_stride,
-    DenseSemanticQualityOptions quality)
+    DenseSemanticQualityOptions quality, std::string model_id,
+    std::vector<std::string> class_names)
     : segmenter_(model_path, device, classes, canvas_width, canvas_height),
-      taxonomy_(std::move(taxonomy)), dump_dir_(std::move(dump_dir)),
+      taxonomy_(std::move(taxonomy)), model_id_(std::move(model_id)),
+      class_names_(std::move(class_names)), dump_dir_(std::move(dump_dir)),
       max_pending_(max_pending), dense_pixel_stride_(dense_pixel_stride),
       dense_quality_(quality), landmark_map_(classes) {
     if (max_pending_ == 0 || max_pending_ > 64)
         throw std::invalid_argument("semantic worker queue must have 1..64 slots");
-    if (taxonomy_.empty())
-        throw std::invalid_argument("semantic taxonomy must not be empty");
+    if (taxonomy_.empty() || model_id_.empty())
+        throw std::invalid_argument("semantic taxonomy/model identity must not be empty");
+    if (class_names_.size() != classes)
+        throw std::invalid_argument("semantic class names must match model class count");
     if (!dump_dir_.empty())
         std::filesystem::create_directories(dump_dir_);
     if (dense_pixel_stride_ < 1 || dense_pixel_stride_ > 16)
@@ -116,6 +120,41 @@ std::size_t PidNetSemanticWorker::record_count() const {
     return records_.size();
 }
 
+std::vector<SemanticKeyframeHit> PidNetSemanticWorker::query_class(
+    const std::string &name, double min_mean_confidence,
+    double min_pixel_coverage, std::size_t limit) const {
+    std::vector<SemanticKeyframeHit> hits;
+    if (!std::isfinite(min_mean_confidence) ||
+        !std::isfinite(min_pixel_coverage) ||
+        min_mean_confidence < 0 || min_mean_confidence > 1 ||
+        min_pixel_coverage < 0 || min_pixel_coverage > 1 || limit == 0)
+        return hits;
+    const auto it=std::find(class_names_.begin(),class_names_.end(),name);
+    if(it==class_names_.end())return hits;
+    const auto class_id=static_cast<std::uint32_t>(
+        std::distance(class_names_.begin(),it));
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto &[key, rec] : records_) {
+        if (class_id >= rec.classes.size()) continue;
+        const auto &summary=rec.classes[class_id];
+        if (!summary.pixel_count ||
+            summary.mean_confidence < min_mean_confidence ||
+            summary.coverage < min_pixel_coverage)continue;
+        hits.push_back(SemanticKeyframeHit{
+            rec.session_id,rec.frame_id,rec.timestamp,class_id,
+            summary.coverage,summary.mean_confidence,
+            rec.body_position,rec.body_quaternion_xyzw,
+            rec.taxonomy,rec.model_id,false});
+    }
+    std::sort(hits.begin(),hits.end(),[](const auto &a,const auto &b){
+        if(a.timestamp!=b.timestamp)return a.timestamp>b.timestamp;
+        if(a.session_id!=b.session_id)return a.session_id<b.session_id;
+        return a.frame_id<b.frame_id;
+    });
+    if(hits.size()>limit)hits.resize(limit);
+    return hits;
+}
+
 std::optional<SemanticKeyframeRecord> PidNetSemanticWorker::find(
     std::uint64_t session_id, std::uint64_t frame_id) const {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -174,9 +213,34 @@ void PidNetSemanticWorker::process(SemanticKeyframeSnapshot job) {
     rec.height = job.image.height;
     rec.num_classes = output.num_classes;
     rec.taxonomy = taxonomy_;
+    rec.model_id = model_id_;
+    rec.body_position = job.body_position;
+    rec.body_quaternion_xyzw = job.body_quaternion_xyzw;
     rec.camera_position = job.camera_position;
     rec.camera_quaternion_xyzw = job.camera_quaternion_xyzw;
     rec.K_row_major = job.K_row_major;
+
+    rec.classes.resize(output.num_classes);
+    const double area = static_cast<double>(output.label.total());
+    std::vector<double> confidence_sum(output.num_classes, 0.0);
+    for (int y=0;y<output.label.rows;++y) {
+        for (int x=0;x<output.label.cols;++x) {
+            const auto id=output.label.at<std::uint8_t>(y,x);
+            if(id>=output.num_classes)
+                throw std::runtime_error("PIDNet emitted class ID out of taxonomy bounds");
+            const double confidence=output.confidence.at<float>(y,x);
+            if(!std::isfinite(confidence)||confidence<0||confidence>1)
+                throw std::runtime_error("PIDNet emitted invalid confidence");
+            rec.classes[id].class_id=id;
+            ++rec.classes[id].pixel_count;
+            confidence_sum[id]+=confidence;
+        }
+    }
+    for (std::uint32_t i=0;i<output.num_classes;++i) {
+        auto &v=rec.classes[i];
+        if(v.pixel_count)v.mean_confidence=confidence_sum[i]/v.pixel_count;
+        v.coverage=static_cast<double>(v.pixel_count)/area;
+    }
 
     if (!cv::imencode(".png", output.label, rec.labels_png))
         throw std::runtime_error("PIDNet worker: failed to encode label PNG");

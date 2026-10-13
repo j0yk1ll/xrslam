@@ -124,4 +124,13 @@ size_t XRSLAMGetDenseSemanticMapSnapshot(XRSLAMDenseSemanticPoint *dst,
         dst, capacity, total, stable_only != 0);
 }
 
+size_t XRSLAMQuerySemanticKeyframes(
+    const char *class_name, double min_mean_confidence,
+    double min_pixel_coverage, size_t max_results,
+    XRSLAMSemanticKeyframeHit *dst, size_t capacity, size_t *total) {
+    return xrslam::XRSLAMManager::Instance().QuerySemanticKeyframes(
+        class_name,min_mean_confidence,min_pixel_coverage,
+        max_results,dst,capacity,total);
+}
+
 void XRSLAMDestroy() { xrslam::XRSLAMManager::Instance().Destroy(); }

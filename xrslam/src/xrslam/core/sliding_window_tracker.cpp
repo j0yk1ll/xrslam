@@ -773,8 +773,13 @@ void SlidingWindowTracker::archive_optimized_keyframes() {
                 auto depth = staged_semantic_depths_.find(frame->id());
                 if (depth != staged_semantic_depths_.end())
                     snapshot.depth = std::move(depth->second);
-                for (int d = 0; d < 3; ++d)
+                for (int d = 0; d < 3; ++d) {
+                    snapshot.body_position[d] = source->body_pose.p[d];
                     snapshot.camera_position[d] = source->camera_pose.p[d];
+                }
+                snapshot.body_quaternion_xyzw = {
+                    source->body_pose.q.x(), source->body_pose.q.y(),
+                    source->body_pose.q.z(), source->body_pose.q.w()};
                 snapshot.camera_quaternion_xyzw = {
                     source->camera_pose.q.x(), source->camera_pose.q.y(),
                     source->camera_pose.q.z(), source->camera_pose.q.w()};

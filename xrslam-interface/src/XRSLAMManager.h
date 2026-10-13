@@ -36,6 +36,10 @@ class XRSLAMManager {
     size_t CopySemanticMap(XRSLAMSemanticMapPoint *dst, size_t capacity,
                            size_t *total, bool stable_only) const;
     bool WaitForSemanticIdle() const;
+    size_t QuerySemanticKeyframes(
+        const char *class_name, double min_mean_confidence,
+        double min_pixel_coverage, size_t max_results,
+        XRSLAMSemanticKeyframeHit *dst, size_t capacity, size_t *total) const;
     size_t CopyDenseSemanticMap(XRSLAMDenseSemanticPoint *dst,
                                 size_t capacity, size_t *total,
                                 bool stable_only) const;

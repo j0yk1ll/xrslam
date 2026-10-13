@@ -54,6 +54,9 @@ struct SemanticKeyframeSnapshot {
     SemanticMetricDepthBuffer depth; // empty for non-RGBD/unsupported sources
     // Session-local optimized camera pose at first archival. Latest geometry
     // remains in KeyframeArchive, which can be refreshed independently.
+    // Optimized robot-body pose at the observation time, session-local.
+    std::array<double, 3> body_position{};
+    std::array<double, 4> body_quaternion_xyzw{};
     std::array<double, 3> camera_position{};
     std::array<double, 4> camera_quaternion_xyzw{};
     std::array<double, 9> K_row_major{};

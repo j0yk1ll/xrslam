@@ -5,6 +5,7 @@
 #include <xrslam/core/place_graph_4dof_shadow.h>
 #include <xrslam/place_recognition.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -57,6 +58,30 @@ class PersistentRelocalizationMap {
                 return session.global_alignment;
         }
         return std::nullopt;
+    }
+
+    // Only a validated loader may use this. Preserve session and place keys
+    // exactly as written; do not conflate coordinate frames.
+    bool restore_session(RelocalizationReferenceSession session) {
+        if (session.session_id == 0 ||
+            session.session_id <= next_session_id_ ||
+            (session.archive.size() == 0 && session.places.empty()))
+            return false;
+        next_session_id_ = session.session_id;
+        sessions_.push_back(std::move(session));
+        return true;
+    }
+
+    const std::vector<RelocalizationReferenceSession> &sessions() const {
+        return sessions_;
+    }
+
+    PlaceKey max_place_key() const {
+        PlaceKey result = 0;
+        for (const auto &s : sessions_)
+            for (const auto &p : s.places.entries())
+                result = std::max(result, p.key);
+        return result;
     }
 
     size_t session_count() const { return sessions_.size(); }

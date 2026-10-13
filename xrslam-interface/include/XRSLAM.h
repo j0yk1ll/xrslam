@@ -303,6 +303,26 @@ size_t XRSLAMGetDenseSemanticMapSnapshot(XRSLAMDenseSemanticPoint *dst,
                                          size_t capacity, size_t *total,
                                          int stable_only);
 
+// Session-local robot-body observation poses; map_aligned is always false
+// until verified map-frame session alignment is implemented. Call with
+// dst=NULL/capacity=0 to discover total (limited by max_results).
+typedef struct XRSLAMSemanticKeyframeHit {
+    uint64_t session_id, frame_id;
+    double timestamp;
+    uint32_t class_id;
+    double coverage, mean_confidence;
+    double body_position[3];
+    double body_quaternion_xyzw[4];
+    int map_aligned;
+    char taxonomy[64];
+    char model_id[128];
+} XRSLAMSemanticKeyframeHit;
+
+size_t XRSLAMQuerySemanticKeyframes(
+    const char *class_name, double min_mean_confidence,
+    double min_pixel_coverage, size_t max_results,
+    XRSLAMSemanticKeyframeHit *dst, size_t capacity, size_t *total);
+
 /**
  * @brief destroy SLAM system
  */

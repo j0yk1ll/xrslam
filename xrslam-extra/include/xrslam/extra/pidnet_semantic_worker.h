@@ -30,6 +30,28 @@ struct SemanticLandmarkSample {
     std::array<double, 3> position_session_world{};
 };
 
+struct SemanticClassStats {
+    std::uint32_t class_id = 0;
+    std::uint64_t pixel_count = 0;
+    double mean_confidence = 0.0;
+    double coverage = 0.0;
+};
+
+struct SemanticKeyframeHit {
+    std::uint64_t session_id = 0;
+    std::uint64_t frame_id = 0;
+    double timestamp = 0;
+    std::uint32_t class_id = 0;
+    double coverage = 0;
+    double mean_confidence = 0;
+    std::array<double, 3> body_position{};
+    std::array<double, 4> body_quaternion_xyzw{};
+    std::string taxonomy;
+    std::string model_id;
+    // A session-local body pose is never advertised as map-frame navigation.
+    bool map_aligned = false;
+};
+
 struct SemanticKeyframeRecord {
     std::uint64_t session_id = 0;
     std::uint64_t frame_id = 0;
@@ -37,6 +59,10 @@ struct SemanticKeyframeRecord {
     std::uint32_t width = 0, height = 0;
     std::uint32_t num_classes = 0;
     std::string taxonomy;
+    std::string model_id;
+    std::array<double, 3> body_position{};
+    std::array<double, 4> body_quaternion_xyzw{};
+    std::vector<SemanticClassStats> classes;
     std::array<double, 3> camera_position{};
     std::array<double, 4> camera_quaternion_xyzw{};
     std::array<double, 9> K_row_major{};
@@ -61,7 +87,9 @@ class PidNetSemanticWorker final : public SemanticKeyframeSink {
                          bool enable_dense = false,
                          double dense_voxel_size_m = 0.03,
                          int dense_pixel_stride = 4,
-                         DenseSemanticQualityOptions quality = {});
+                         DenseSemanticQualityOptions quality = {},
+                         std::string model_id = {},
+                         std::vector<std::string> class_names = {});
     ~PidNetSemanticWorker() override;
 
     PidNetSemanticWorker(const PidNetSemanticWorker &) = delete;
@@ -78,6 +106,12 @@ class PidNetSemanticWorker final : public SemanticKeyframeSink {
     std::optional<SemanticKeyframeRecord> find(
         std::uint64_t session_id, std::uint64_t frame_id) const;
     std::size_t record_count() const;
+
+    // Query only the class taxonomy active for this worker; never relabel
+    // old ID values using a different model.
+    std::vector<SemanticKeyframeHit> query_class(
+        const std::string &name, double min_mean_confidence,
+        double min_pixel_coverage, std::size_t limit) const;
 
     // Persistent session-local semantic landmark map; immutable copies.
     std::optional<SemanticFusedLandmark> find_landmark(
@@ -98,6 +132,8 @@ class PidNetSemanticWorker final : public SemanticKeyframeSink {
 
     PidNetSegmenter segmenter_;
     const std::string taxonomy_;
+    const std::string model_id_;
+    const std::vector<std::string> class_names_;
     const std::string dump_dir_;
     const std::size_t max_pending_;
     const int dense_pixel_stride_;

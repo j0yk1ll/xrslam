@@ -17,6 +17,9 @@
 #endif
 
 #include <algorithm>
+#include <cstring>
+#include <vector>
+#include <sstream>
 #include <optional>
 #include <cstdlib>
 #include <cstdio>
@@ -204,11 +207,36 @@ void XRSLAMManager::Init(std::shared_ptr<Config> config) {
                 quality.depth_edge_abs_m, quality.depth_edge_relative,
                 quality.min_views, quality.min_neighbors);
         }
+        // Stable, explicit class names and model version; a new indoor
+        // checkpoint can never silently reinterpret old numeric labels.
+        const char *taxonomy_env=std::getenv("XRSLAM_PIDNET_TAXONOMY");
+        const std::string taxonomy=taxonomy_env && taxonomy_env[0] ?
+            taxonomy_env : "cityscapes19";
+        const char *model_id_env=std::getenv("XRSLAM_PIDNET_MODEL_ID");
+        const std::string model_id=model_id_env && model_id_env[0] ?
+            model_id_env : std::string(model);
+        std::vector<std::string> class_names;
+        if(const char *raw=std::getenv("XRSLAM_PIDNET_CLASS_NAMES")) {
+            std::stringstream ss(raw);std::string s;
+            while(std::getline(ss,s,','))class_names.push_back(s);
+        } else if(taxonomy=="cityscapes19") {
+            class_names={"road","sidewalk","building","wall","fence","pole",
+                "traffic light","traffic sign","vegetation","terrain","sky",
+                "person","rider","car","truck","bus","train","motorcycle","bicycle"};
+        }
+        std::uint32_t class_count=19;
+        if(const char *raw=std::getenv("XRSLAM_PIDNET_NUM_CLASSES")) {
+            const long parsed=std::strtol(raw,nullptr,10);
+            if(parsed<1 || parsed>255)throw std::runtime_error("invalid semantic class count");
+            class_count=static_cast<std::uint32_t>(parsed);
+        }
+        if(class_names.size()!=class_count)
+            throw std::runtime_error("XRSLAM_PIDNET_CLASS_NAMES must enumerate every model class");
         detail_->set_semantic_keyframe_sink(
             std::make_shared<xrslam::extra::PidNetSemanticWorker>(
-                model, device && device[0] ? device : "cpu", 19,
-                1024, 512, "cityscapes19", outdir ? outdir : "", 2,
-                dense_requested, voxel, stride, quality));
+                model, device && device[0] ? device : "cpu", class_count,
+                1024, 512, taxonomy, outdir ? outdir : "", 2,
+                dense_requested, voxel, stride, quality,model_id,class_names));
         if (dense_requested)
             std::fprintf(stderr, "[DenseSemantic] event=enabled voxel=%.6f "
                                  "pixel_stride=%d max_voxels=250000\n",
@@ -280,6 +308,39 @@ size_t XRSLAMManager::CopySemanticMap(
     (void)capacity;
     (void)stable_only;
     return 0;
+#endif
+}
+
+size_t XRSLAMManager::QuerySemanticKeyframes(
+    const char *class_name, double min_mean_confidence,
+    double min_pixel_coverage, size_t max_results,
+    XRSLAMSemanticKeyframeHit *dst, size_t capacity, size_t *total) const {
+    if(total)*total=0;
+    if((capacity && !dst)||!class_name||!class_name[0])return 0;
+#if defined(XRSLAM_HAS_PIDNET)
+    if(!detail_)return 0;
+    auto *worker=dynamic_cast<extra::PidNetSemanticWorker*>(
+        detail_->semantic_keyframe_sink());
+    if(!worker)return 0;
+    const auto hits=worker->query_class(class_name,min_mean_confidence,
+                                      min_pixel_coverage,max_results);
+    if(total)*total=hits.size();
+    const auto count=std::min(capacity,hits.size());
+    for(size_t i=0;i<count;++i) {
+        const auto &h=hits[i];auto &o=dst[i];o={};
+        o.session_id=h.session_id;o.frame_id=h.frame_id;
+        o.timestamp=h.timestamp;o.class_id=h.class_id;
+        o.coverage=h.coverage;o.mean_confidence=h.mean_confidence;
+        for(int k=0;k<3;++k)o.body_position[k]=h.body_position[k];
+        for(int k=0;k<4;++k)o.body_quaternion_xyzw[k]=h.body_quaternion_xyzw[k];
+        o.map_aligned=h.map_aligned?1:0;
+        std::snprintf(o.taxonomy,sizeof(o.taxonomy),"%s",h.taxonomy.c_str());
+        std::snprintf(o.model_id,sizeof(o.model_id),"%s",h.model_id.c_str());
+    }
+    return count;
+#else
+    (void)min_mean_confidence;(void)min_pixel_coverage;(void)max_results;
+    (void)dst;return 0;
 #endif
 }
 

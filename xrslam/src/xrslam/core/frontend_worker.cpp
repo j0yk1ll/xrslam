@@ -3,6 +3,9 @@
 #include <cstdlib>
 #include <cmath>
 #include <optional>
+#include <xrslam/core/persistent_relocalization_map_io.h>
+#include <filesystem>
+#include <stdexcept>
 #include <xrslam/core/relocalization_probe.h>
 #include <xrslam/core/relocalization_bootstrap.h>
 #include <xrslam/core/relocalization_tracking_health.h>
@@ -28,9 +31,65 @@ FrontendWorker::FrontendWorker(XRSLAM::Detail *detail,
     initializer = std::make_unique<Initializer>(config);
 
     latest_state = {{}, nil(), {}, {}};
+    const char *path = std::getenv("XRSLAM_REFERENCE_MAP_PATH");
+    if (path && path[0]) {
+        const char *identity = std::getenv("XRSLAM_MAP_ID");
+        if (!identity || !identity[0])
+            throw std::runtime_error("XRSLAM_MAP_ID required for persistent references");
+        reference_map_path_ = path;
+        reference_map_identity_ = identity;
+        if (std::filesystem::exists(reference_map_path_)) {
+            std::string error;
+            if (!load_relocalization_map(persistent_relocalization_map_,
+                                         reference_map_path_,
+                                         reference_map_identity_, &error))
+                throw std::runtime_error("reference map load failed: " + error);
+            for (const auto &session : persistent_relocalization_map_.sessions())
+                next_semantic_tracking_session_id_ =
+                    std::max(next_semantic_tracking_session_id_,
+                             session.semantic_tracking_session_id);
+            std::fprintf(stderr,
+                "[RelocalizationMapIO] event=loaded sessions=%zu places=%zu archived=%zu\n",
+                persistent_relocalization_map_.session_count(),
+                persistent_relocalization_map_.place_keyframe_count(),
+                persistent_relocalization_map_.archived_keyframe_count());
+        }
+    }
 }
 
 FrontendWorker::~FrontendWorker() = default;
+
+void FrontendWorker::index_loaded_references(PlaceDatabase &database) const {
+    for (const auto &session : persistent_relocalization_map_.sessions()) {
+        for (const auto &place : session.places.entries()) {
+            if (!database.add(place.key, place.descriptor))
+                throw std::runtime_error(
+                    "USearch restore rejected a place key or descriptor dimension");
+        }
+    }
+}
+
+void FrontendWorker::save_reference_map_after_stop() {
+    if (reference_map_path_.empty()) return;
+    if (sliding_window_tracker) {
+        auto reference = sliding_window_tracker->take_relocalization_reference();
+        if (global_drift_available_)
+            reference.global_alignment = global_drift_snapshot_;
+        persistent_relocalization_map_.capture(std::move(reference));
+    }
+    std::string error;
+    if (!save_relocalization_map(persistent_relocalization_map_,
+                                 reference_map_path_,reference_map_identity_,
+                                 &error)) {
+        std::fprintf(stderr,"[RelocalizationMapIO] event=save_failed reason=%s\n",error.c_str());
+    } else {
+        std::fprintf(stderr,"[RelocalizationMapIO] event=saved sessions=%zu places=%zu archived=%zu\n",
+            persistent_relocalization_map_.session_count(),
+            persistent_relocalization_map_.place_keyframe_count(),
+            persistent_relocalization_map_.archived_keyframe_count());
+    }
+}
+
 
 bool FrontendWorker::empty() const { return pending_frame_ids.empty(); }
 
