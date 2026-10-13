@@ -1,3 +1,0 @@
-<launch>
-    <node name="visualization" pkg="rviz" type="rviz" output="log" args="-d $(find xrslam_ros)/rviz_config.rviz" />
-</launch>
