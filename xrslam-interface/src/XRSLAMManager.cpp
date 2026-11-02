@@ -610,7 +610,19 @@ void XRSLAMManager::GetResultLandmarks(XRSLAMLandmarks *landmarks) const {
     }
 }
 
-void XRSLAMManager::GetResultFeatures(XRSLAMFeatures *features) const {}
+void XRSLAMManager::GetResultFeatures(XRSLAMFeatures *features) const {
+    if (!features) return;
+    features->pos.clear();
+    inspect(feature_tracker_tracked_pixels, tracked_pixels) {
+        if (tracked_pixels.has_value()) {
+            auto pixels = std::any_cast<std::vector<std::pair<double, double>>>(
+                tracked_pixels);
+            features->pos.reserve(pixels.size());
+            for (const auto &p : pixels)
+                features->pos.push_back({p.first, p.second});
+        }
+    }
+}
 
 void XRSLAMManager::GetResultBias(XRSLAMIMUBias *bias) const {
     inspect_debug(sliding_window_current_bg, bg) {
