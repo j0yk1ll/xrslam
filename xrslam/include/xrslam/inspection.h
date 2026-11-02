@@ -45,6 +45,7 @@ class InspectionSupport {
         input_output_lag,
         feature_tracker_angle_misalignment,
         feature_tracker_painter,
+        feature_tracker_tracked_pixels,
         sliding_window_track_painter,
         sliding_window_reprojection_painter,
         sliding_window_landmarks,
