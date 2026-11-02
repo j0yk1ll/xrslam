@@ -147,6 +147,20 @@ void FeatureTracker::work(std::unique_lock<std::mutex> &l) {
             map->erase_frame(0);
         }
 
+        // Capture the exact tracked pixel locations from the latest frame.
+        // The inspection storage owns the snapshot, not the live tracker.
+        inspect(feature_tracker_tracked_pixels, tracked_pixels) {
+            std::vector<std::pair<double, double>> pixels;
+            auto *tracked_frame = map->get_frame(map->frame_num() - 1);
+            pixels.reserve(tracked_frame->keypoint_num());
+            for (size_t i = 0; i < tracked_frame->keypoint_num(); ++i) {
+                if (tracked_frame->get_track(i)) {
+                    auto px = apply_k(tracked_frame->get_keypoint(i), tracked_frame->K);
+                    pixels.emplace_back(px(0), px(1));
+                }
+            }
+            tracked_pixels = std::move(pixels);
+        }
         inspect_debug(feature_tracker_painter, p) {
             if (p.has_value()) {
                 auto painter = std::any_cast<InspectPainter *>(p);
