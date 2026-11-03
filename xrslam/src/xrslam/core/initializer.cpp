@@ -152,6 +152,7 @@ std::unique_ptr<SlidingWindowTracker> Initializer::initialize() {
                     Landmark point;
                     point.p = track->get_landmark_point();
                     point.triangulated = track->tag(TT_TRIANGULATED);
+                    point.track_id = static_cast<uint64_t>(track->id());
                     points.push_back(point);
                 }
             }
