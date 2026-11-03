@@ -3711,7 +3711,7 @@ bool SlidingWindowTracker::track() {
     }
 
 
-    inspect_debug(sliding_window_landmarks, landmarks) {
+    inspect(sliding_window_landmarks, landmarks) {
         std::vector<Landmark> points;
         points.reserve(map->track_num());
         for (size_t i = 0; i < map->track_num(); ++i) {
