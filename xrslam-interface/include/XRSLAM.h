@@ -168,6 +168,10 @@ typedef enum XRSLAMState {
  */
 typedef struct XRSLAMLandmark {
     double x, y, z;
+    /* Native track identity, unique within one XRSLAM tracking session. */
+    uint64_t track_id;
+    /* Only triangulated landmarks may enter a persistent 3D map. */
+    uint8_t triangulated;
 } XRSLAMLandmark;
 typedef struct XRSLAMLandmarks {
     XRSLAMLandmark *landmarks;
