@@ -611,6 +611,8 @@ void XRSLAMManager::GetResultLandmarks(XRSLAMLandmarks *landmarks) const {
             landmarks->landmarks[i].x = cur_p(0);
             landmarks->landmarks[i].y = cur_p(1);
             landmarks->landmarks[i].z = cur_p(2);
+            landmarks->landmarks[i].track_id = pts[i].track_id;
+            landmarks->landmarks[i].triangulated = pts[i].triangulated ? 1 : 0;
         }
     }
 }
