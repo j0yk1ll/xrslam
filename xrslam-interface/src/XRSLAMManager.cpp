@@ -600,7 +600,7 @@ void XRSLAMManager::GetResultLandmarks(XRSLAMLandmarks *landmarks) const {
     if (!landmarks) return;
     landmarks->num_landmarks = 0;
     landmarks->landmarks = nullptr;
-    inspect_debug(sliding_window_landmarks, swlandmarks) {
+    inspect(sliding_window_landmarks, swlandmarks) {
         if (!swlandmarks.has_value()) return;
         auto pts = std::any_cast<std::vector<xrslam::Landmark>>(swlandmarks);
         if (pts.empty()) return;
