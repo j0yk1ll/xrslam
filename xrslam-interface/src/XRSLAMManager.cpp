@@ -597,9 +597,14 @@ void XRSLAMManager::GetResultState(XRSLAMState *state) const {
     }
 }
 void XRSLAMManager::GetResultLandmarks(XRSLAMLandmarks *landmarks) const {
+    if (!landmarks) return;
+    landmarks->num_landmarks = 0;
+    landmarks->landmarks = nullptr;
     inspect_debug(sliding_window_landmarks, swlandmarks) {
+        if (!swlandmarks.has_value()) return;
         auto pts = std::any_cast<std::vector<xrslam::Landmark>>(swlandmarks);
-        landmarks->num_landmarks = pts.size();
+        if (pts.empty()) return;
+        landmarks->num_landmarks = static_cast<int>(pts.size());
         landmarks->landmarks = new XRSLAMLandmark[pts.size()];
         for (int i = 0; i < pts.size(); i++) {
             xrslam::vector<3> cur_p = pts[i].p;
