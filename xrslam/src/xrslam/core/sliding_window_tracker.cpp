@@ -3729,6 +3729,7 @@ bool SlidingWindowTracker::track() {
                     Landmark point;
                     point.p = track->get_landmark_point();
                     point.triangulated = triangulated;
+                    point.track_id = static_cast<uint64_t>(track->id());
                     points.push_back(point);
                 }
             }
