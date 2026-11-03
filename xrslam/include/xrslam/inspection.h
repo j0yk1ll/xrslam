@@ -22,6 +22,7 @@ struct KeyframeState {
 struct Landmark {
     vector<3> p;
     bool triangulated;
+    uint64_t track_id = 0;
 };
 
 class InspectPainter {
