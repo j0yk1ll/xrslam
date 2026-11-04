@@ -175,6 +175,7 @@ void XRSLAMManager::Init(std::shared_ptr<Config> config) {
                            a2env && std::string(a2env) == "1";
     async_depth_stats_ = {};
     delayed_depth_queue_.clear();
+    geometry_depth_queue_.clear();
     detail_ = std::make_unique<XRSLAM::Detail>(config);
     const char *semantic_enable = std::getenv("XRSLAM_SEMANTICS_ENABLE");
     if (semantic_enable && std::string(semantic_enable) == "1") {
@@ -524,6 +525,9 @@ bool XRSLAMManager::GetAsyncDepthStats(XRSLAMAsyncDepthStats *out) {
     if (!out) return false;
     std::lock_guard<std::mutex> lck(input_mutex_);
     *out = async_depth_stats_;
+    if (detail_ && detail_->frontend)
+        out->optimized_snapshots =
+            detail_->frontend->optimized_depth_snapshot_count();
     return true;
 }
 
@@ -539,90 +543,137 @@ double median_of(std::vector<double> &v) {
 } // namespace
 
 void XRSLAMManager::ProcessDelayedDepthLocked() {
-    // Read-only diagnostic association: the FeatureTracker owns the map.
-    // The map lock prevents frame eviction during timestamp lookup/sampling.
+    // Stage A2 RGB-frame association remains separate from the optimized
+    // Stage A3 geometry queue. Never keep a live Frame/Track pointer.
     if (!detail_ || !detail_->feature_tracker ||
         !detail_->feature_tracker->map) return;
     auto *map = detail_->feature_tracker->map.get();
-    auto guard = map->lock();
-    if (map->frame_num() == 0) return;
-    constexpr double epsilon = 1.0e-6;
-    const double oldest = map->get_frame(0)->image->t;
-    const double newest = map->get_frame(map->frame_num() - 1)->image->t;
-    std::deque<DelayedDepth> waiting;
-    while (!delayed_depth_queue_.empty()) {
-        DelayedDepth sample = std::move(delayed_depth_queue_.front());
-        delayed_depth_queue_.pop_front();
-        if (sample.timestamp < oldest - epsilon) {
-            ++async_depth_stats_.too_old;
-            continue;
-        }
-        // The source RGB frame may not have reached the tracker yet.
-        if (sample.timestamp > newest + epsilon) {
-            waiting.push_back(std::move(sample));
-            continue;
-        }
-        const Frame *matched = nullptr;
-        for (size_t i = 0; i < map->frame_num(); ++i) {
-            const Frame *candidate = map->get_frame(i);
-            if (std::abs(candidate->image->t - sample.timestamp) < epsilon) {
-                matched = candidate;
-                break;
-            }
-        }
-        if (!matched) {
-            ++async_depth_stats_.unknown;
-            continue;
-        }
-        ++async_depth_stats_.associated;
-        std::vector<double> valid_depths;
-        std::vector<double> ratios;
-        const auto camera_pose = matched->get_pose(matched->camera);
-        for (size_t i = 0; i < matched->keypoint_num(); ++i) {
-            if (!matched->get_track(i)) continue;
-            ++async_depth_stats_.tracked_feature_samples;
-            const auto pixel = apply_k(matched->get_keypoint(i), matched->K);
-            if (!pixel.allFinite()) continue;
-            const int x = static_cast<int>(std::lround(pixel(0)));
-            const int y = static_cast<int>(std::lround(pixel(1)));
-            if (x < 0 || y < 0 || x >= sample.meters.cols ||
-                y >= sample.meters.rows) continue;
-            const float z = sample.meters.at<float>(y, x);
-            if (!std::isfinite(z) || z <= 0.05f || z >= 50.0f)
-                continue;
-            ++async_depth_stats_.valid_feature_samples;
-            valid_depths.push_back(z);
-            if (async_depth_stats_.depth_min_m == 0.0 ||
-                z < async_depth_stats_.depth_min_m)
-                async_depth_stats_.depth_min_m = z;
-            async_depth_stats_.depth_max_m =
-                std::max(async_depth_stats_.depth_max_m, static_cast<double>(z));
+    {
+        auto guard = map->lock();
+        if (map->frame_num() != 0) {
+            constexpr double epsilon = 1.0e-6;
+            const double oldest = map->get_frame(0)->image->t;
+            const double newest =
+                map->get_frame(map->frame_num() - 1)->image->t;
+            std::deque<DelayedDepth> waiting;
+            while (!delayed_depth_queue_.empty()) {
+                DelayedDepth sample = std::move(delayed_depth_queue_.front());
+                delayed_depth_queue_.pop_front();
+                if (sample.timestamp < oldest - epsilon) {
+                    ++async_depth_stats_.too_old;
+                    continue;
+                }
+                if (sample.timestamp > newest + epsilon) {
+                    waiting.push_back(std::move(sample));
+                    continue;
+                }
+                const Frame *matched = nullptr;
+                for (size_t i = 0; i < map->frame_num(); ++i) {
+                    const Frame *candidate = map->get_frame(i);
+                    if (std::abs(candidate->image->t - sample.timestamp) <
+                        epsilon) {
+                        matched = candidate;
+                        break;
+                    }
+                }
+                if (!matched) {
+                    ++async_depth_stats_.unknown;
+                    continue;
+                }
+                ++async_depth_stats_.associated;
+                std::vector<double> valid_depths;
+                for (size_t i = 0; i < matched->keypoint_num(); ++i) {
+                    if (!matched->get_track(i)) continue;
+                    ++async_depth_stats_.tracked_feature_samples;
+                    const auto pixel =
+                        apply_k(matched->get_keypoint(i), matched->K);
+                    if (!pixel.allFinite()) continue;
+                    const int x = static_cast<int>(std::lround(pixel(0)));
+                    const int y = static_cast<int>(std::lround(pixel(1)));
+                    if (x < 0 || y < 0 || x >= sample.meters.cols ||
+                        y >= sample.meters.rows) continue;
+                    const float z = sample.meters.at<float>(y, x);
+                    if (!std::isfinite(z) || z <= 0.05f || z >= 50.0f)
+                        continue;
+                    ++async_depth_stats_.valid_feature_samples;
+                    valid_depths.push_back(z);
+                    if (async_depth_stats_.depth_min_m == 0.0 ||
+                        z < async_depth_stats_.depth_min_m)
+                        async_depth_stats_.depth_min_m = z;
+                    async_depth_stats_.depth_max_m =
+                        std::max(async_depth_stats_.depth_max_m,
+                                 static_cast<double>(z));
+                }
+                if (!valid_depths.empty())
+                    async_depth_stats_.latest_depth_median_m =
+                        median_of(valid_depths);
 
-            // Only triangulated tracks with finite positive inverse depth
-            // can provide a visual-scale prediction. No state is modified.
-            const Track *track = matched->get_track(i);
-            if (!track->tag(TT_VALID) || !track->tag(TT_TRIANGULATED) ||
-                !std::isfinite(track->landmark.inv_depth) ||
-                track->landmark.inv_depth <= 0.0)
+                // Transfer the owned depth image, not a pointer to the
+                // continuous tracker. Optimized snapshots arrive later.
+                constexpr size_t max_geometry_queue = 16;
+                if (geometry_depth_queue_.size() >= max_geometry_queue) {
+                    geometry_depth_queue_.pop_front();
+                    ++async_depth_stats_.geometry_frames_expired;
+                }
+                geometry_depth_queue_.push_back(std::move(sample));
+            }
+            delayed_depth_queue_.swap(waiting);
+        }
+        async_depth_stats_.pending = delayed_depth_queue_.size();
+    }
+    // No FeatureTracker map lock is held while obtaining frontend snapshots.
+    ProcessOptimizedDepthLocked();
+}
+
+void XRSLAMManager::ProcessOptimizedDepthLocked() {
+    if (!detail_ || !detail_->frontend || !cur_image_) return;
+    const double latest_rgb_timestamp = cur_image_->t;
+    if (!std::isfinite(latest_rgb_timestamp)) return;
+    constexpr double max_wait_seconds = 6.0;
+    std::deque<DelayedDepth> waiting;
+    while (!geometry_depth_queue_.empty()) {
+        DelayedDepth sample = std::move(geometry_depth_queue_.front());
+        geometry_depth_queue_.pop_front();
+
+        OptimizedDepthSnapshot snapshot;
+        if (!detail_->frontend->copy_optimized_depth_snapshot(
+                sample.timestamp, snapshot)) {
+            if (latest_rgb_timestamp - sample.timestamp >
+                max_wait_seconds) {
+                ++async_depth_stats_.geometry_frames_expired;
+            } else {
+                waiting.push_back(std::move(sample));
+            }
+            continue;
+        }
+        // A snapshot without triangulated observations may be replaced by a
+        // later optimized version, so allow it to mature until expiry.
+        if (snapshot.points.empty()) {
+            if (latest_rgb_timestamp - sample.timestamp >
+                max_wait_seconds)
+                ++async_depth_stats_.geometry_frames_expired;
+            else
+                waiting.push_back(std::move(sample));
+            continue;
+        }
+        ++async_depth_stats_.geometry_frames_matched;
+        std::vector<double> ratios;
+        for (const auto &obs : snapshot.points) {
+            if (!std::isfinite(obs.visual_z) || obs.visual_z <= 0.05 ||
+                obs.x < 0 || obs.y < 0 ||
+                obs.x >= sample.meters.cols ||
+                obs.y >= sample.meters.rows)
                 continue;
-            const auto landmark = track->get_landmark_point();
-            if (!landmark.allFinite()) continue;
-            const auto camera_point =
-                camera_pose.q.conjugate() * (landmark - camera_pose.p);
-            const double visual_z = camera_point.z();
-            if (!std::isfinite(visual_z) || visual_z <= 0.05)
+            const float depth = sample.meters.at<float>(obs.y, obs.x);
+            if (!std::isfinite(depth) || depth <= 0.05f ||
+                depth >= 50.0f)
                 continue;
             ++async_depth_stats_.geometry_samples;
-            const double ratio = static_cast<double>(z) / visual_z;
+            const double ratio = static_cast<double>(depth) / obs.visual_z;
             if (!std::isfinite(ratio) || ratio <= 0.0) continue;
             ratios.push_back(ratio);
             ++async_depth_stats_.ratio_samples;
         }
-        if (!valid_depths.empty()) {
-            async_depth_stats_.latest_depth_median_m = median_of(valid_depths);
-        }
-        // A single frame's median and MAD are descriptive; not a global
-        // scale estimate. Require a minimum number of observations.
         if (ratios.size() >= 10) {
             const double med = median_of(ratios);
             std::vector<double> deviations;
@@ -633,10 +684,10 @@ void XRSLAMManager::ProcessDelayedDepthLocked() {
             async_depth_stats_.latest_ratio_mad = median_of(deviations);
             ++async_depth_stats_.ratio_frames;
         }
-        // Constraints remain zero: Stage A3 is read-only.
+        // Read-only. No metric constraints, inverse depth or pose writes.
     }
-    delayed_depth_queue_.swap(waiting);
-    async_depth_stats_.pending = delayed_depth_queue_.size();
+    geometry_depth_queue_.swap(waiting);
+    async_depth_stats_.geometry_pending = geometry_depth_queue_.size();
 }
 
 void XRSLAMManager::GetResultBodyPose(XRSLAMPose *pose) const {
