@@ -77,6 +77,7 @@ class XRSLAMManager {
     std::deque<DelayedDepth> geometry_depth_queue_;
     // Last 32 per-frame medians, not raw per-feature ratios.
     std::deque<double> scale_frame_medians_;
+    std::deque<double> candidate_frame_medians_;
     XRSLAMAsyncDepthStats async_depth_stats_{};
     bool async_depth_enabled_ = false;
     void ProcessDelayedDepthLocked();
