@@ -4,6 +4,7 @@
 #include <xrslam/core/feature_tracker.h>
 #include <xrslam/map/map.h>
 #include <xrslam/map/frame.h>
+#include <xrslam/map/track.h>
 #include <xrslam/geometry/stereo.h>
 #include <xrslam/core/place_graph_4dof_shadow.h>
 #include <xrslam/place_recognition.h>
@@ -526,6 +527,17 @@ bool XRSLAMManager::GetAsyncDepthStats(XRSLAMAsyncDepthStats *out) {
     return true;
 }
 
+namespace {
+double median_of(std::vector<double> &v) {
+    const size_t mid = v.size() / 2;
+    std::nth_element(v.begin(), v.begin() + mid, v.end());
+    const double upper = v[mid];
+    if (v.size() % 2 != 0) return upper;
+    std::nth_element(v.begin(), v.begin() + mid - 1, v.begin() + mid);
+    return 0.5 * (upper + v[mid - 1]);
+}
+} // namespace
+
 void XRSLAMManager::ProcessDelayedDepthLocked() {
     // Read-only diagnostic association: the FeatureTracker owns the map.
     // The map lock prevents frame eviction during timestamp lookup/sampling.
@@ -563,6 +575,9 @@ void XRSLAMManager::ProcessDelayedDepthLocked() {
             continue;
         }
         ++async_depth_stats_.associated;
+        std::vector<double> valid_depths;
+        std::vector<double> ratios;
+        const auto camera_pose = matched->get_pose(matched->camera);
         for (size_t i = 0; i < matched->keypoint_num(); ++i) {
             if (!matched->get_track(i)) continue;
             ++async_depth_stats_.tracked_feature_samples;
@@ -573,10 +588,52 @@ void XRSLAMManager::ProcessDelayedDepthLocked() {
             if (x < 0 || y < 0 || x >= sample.meters.cols ||
                 y >= sample.meters.rows) continue;
             const float z = sample.meters.at<float>(y, x);
-            if (std::isfinite(z) && z > 0.05f && z < 50.0f)
-                ++async_depth_stats_.valid_feature_samples;
+            if (!std::isfinite(z) || z <= 0.05f || z >= 50.0f)
+                continue;
+            ++async_depth_stats_.valid_feature_samples;
+            valid_depths.push_back(z);
+            if (async_depth_stats_.depth_min_m == 0.0 ||
+                z < async_depth_stats_.depth_min_m)
+                async_depth_stats_.depth_min_m = z;
+            async_depth_stats_.depth_max_m =
+                std::max(async_depth_stats_.depth_max_m, static_cast<double>(z));
+
+            // Only triangulated tracks with finite positive inverse depth
+            // can provide a visual-scale prediction. No state is modified.
+            const Track *track = matched->get_track(i);
+            if (!track->tag(TT_VALID) || !track->tag(TT_TRIANGULATED) ||
+                !std::isfinite(track->landmark.inv_depth) ||
+                track->landmark.inv_depth <= 0.0)
+                continue;
+            const auto landmark = track->get_landmark_point();
+            if (!landmark.allFinite()) continue;
+            const auto camera_point =
+                camera_pose.q.conjugate() * (landmark - camera_pose.p);
+            const double visual_z = camera_point.z();
+            if (!std::isfinite(visual_z) || visual_z <= 0.05)
+                continue;
+            ++async_depth_stats_.geometry_samples;
+            const double ratio = static_cast<double>(z) / visual_z;
+            if (!std::isfinite(ratio) || ratio <= 0.0) continue;
+            ratios.push_back(ratio);
+            ++async_depth_stats_.ratio_samples;
         }
-        // Constraints are deliberately NOT modified in Stage A2.
+        if (!valid_depths.empty()) {
+            async_depth_stats_.latest_depth_median_m = median_of(valid_depths);
+        }
+        // A single frame's median and MAD are descriptive; not a global
+        // scale estimate. Require a minimum number of observations.
+        if (ratios.size() >= 10) {
+            const double med = median_of(ratios);
+            std::vector<double> deviations;
+            deviations.reserve(ratios.size());
+            for (double ratio : ratios)
+                deviations.push_back(std::abs(ratio - med));
+            async_depth_stats_.latest_ratio_median = med;
+            async_depth_stats_.latest_ratio_mad = median_of(deviations);
+            ++async_depth_stats_.ratio_frames;
+        }
+        // Constraints remain zero: Stage A3 is read-only.
     }
     delayed_depth_queue_.swap(waiting);
     async_depth_stats_.pending = delayed_depth_queue_.size();
