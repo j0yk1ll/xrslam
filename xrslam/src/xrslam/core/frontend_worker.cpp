@@ -24,6 +24,9 @@
 #include <xrslam/map/frame.h>
 #include <xrslam/map/map.h>
 #include <xrslam/map/track.h>
+#include <xrslam/geometry/stereo.h>
+#include <algorithm>
+#include <cmath>
 
 namespace xrslam {
 
@@ -358,6 +361,8 @@ void FrontendWorker::work(std::unique_lock<std::mutex> &l) {
             }
             initializer.reset();
             relocalization_auto_loss_gate_.reset();
+            clear_optimized_depth_snapshots();
+            capture_optimized_depth_snapshots();
         }
     } else if (sliding_window_tracker) {
         size_t pending_frame_id = pending_frame_ids.front();
@@ -417,6 +422,7 @@ void FrontendWorker::work(std::unique_lock<std::mutex> &l) {
             relocalization_auto_loss_gate_.reset();
         }
         if (tracking_ok) {
+            capture_optimized_depth_snapshots();
             if (relocalization_bootstrap_tracking_) {
                 Frame *last = sliding_window_tracker->map->get_frame(
                     sliding_window_tracker->map->frame_num() - 1);
@@ -566,8 +572,94 @@ void FrontendWorker::work(std::unique_lock<std::mutex> &l) {
                 persistent_relocalization_map_.candidate_reference_count());
             initializer = std::make_unique<Initializer>(config);
             sliding_window_tracker.reset();
+            clear_optimized_depth_snapshots();
         }
     }
+}
+
+void FrontendWorker::clear_optimized_depth_snapshots() {
+    std::lock_guard<std::mutex> lock(optimized_depth_mutex_);
+    optimized_depth_history_.clear();
+}
+
+bool FrontendWorker::copy_optimized_depth_snapshot(
+    double timestamp, OptimizedDepthSnapshot &out) const {
+    std::lock_guard<std::mutex> lock(optimized_depth_mutex_);
+    constexpr double epsilon = 1.0e-6;
+    for (const auto &snapshot : optimized_depth_history_) {
+        if (std::abs(snapshot.timestamp - timestamp) < epsilon) {
+            out = snapshot;
+            return true;
+        }
+    }
+    return false;
+}
+
+size_t FrontendWorker::optimized_depth_snapshot_count() const {
+    std::lock_guard<std::mutex> lock(optimized_depth_mutex_);
+    return optimized_depth_history_.size();
+}
+
+void FrontendWorker::capture_optimized_depth_snapshots() {
+    if (!sliding_window_tracker || !sliding_window_tracker->map)
+        return;
+    // Only the frontend worker calls this, after initialization or a
+    // successful optimizer step. Copy values before releasing map ownership.
+    std::vector<OptimizedDepthSnapshot> updates;
+    const auto *map = sliding_window_tracker->map.get();
+    auto capture_frame = [&](const Frame *frame) {
+        if (!frame || !frame->image || !std::isfinite(frame->image->t))
+            return;
+        OptimizedDepthSnapshot snapshot;
+        snapshot.timestamp = frame->image->t;
+        const auto camera = frame->get_pose(frame->camera);
+        if (!camera.p.allFinite() || !camera.q.coeffs().allFinite())
+            return;
+        for (size_t i = 0; i < frame->keypoint_num(); ++i) {
+            const Track *track = frame->get_track(i);
+            if (!track || !track->all_tagged(
+                    TT_VALID, TT_TRIANGULATED, TT_STATIC) ||
+                !std::isfinite(track->landmark.inv_depth) ||
+                track->landmark.inv_depth <= 0.0)
+                continue;
+            const auto landmark = track->get_landmark_point();
+            if (!landmark.allFinite()) continue;
+            const auto local = camera.q.conjugate() * (landmark - camera.p);
+            if (!local.allFinite() || local.z() <= 0.05) continue;
+            const auto px = apply_k(frame->get_keypoint(i), frame->K);
+            if (!px.allFinite()) continue;
+            snapshot.points.push_back({
+                static_cast<int>(std::lround(px.x())),
+                static_cast<int>(std::lround(px.y())),
+                local.z()});
+        }
+        updates.push_back(std::move(snapshot));
+    };
+    for (size_t i = 0; i < map->frame_num(); ++i) {
+        const Frame *frame = map->get_frame(i);
+        capture_frame(frame);
+        for (const auto &subframe : frame->subframes)
+            capture_frame(subframe.get());
+    }
+
+    std::lock_guard<std::mutex> lock(optimized_depth_mutex_);
+    constexpr double epsilon = 1.0e-6;
+    for (auto &update : updates) {
+        auto it = std::find_if(
+            optimized_depth_history_.begin(),
+            optimized_depth_history_.end(),
+            [&](const OptimizedDepthSnapshot &old) {
+                return std::abs(old.timestamp - update.timestamp) < epsilon;
+            });
+        if (it != optimized_depth_history_.end())
+            *it = std::move(update);
+        else
+            optimized_depth_history_.push_back(std::move(update));
+    }
+    // Bound all retained observations, including image-free optimizer states.
+    constexpr size_t max_snapshots = 128;
+    while (optimized_depth_history_.size() > max_snapshots)
+        optimized_depth_history_.pop_front();
 }
 
 void FrontendWorker::issue_frame(Frame *frame) {
