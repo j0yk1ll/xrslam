@@ -1,6 +1,10 @@
 #include "XRSLAMManager.h"
 
 #include <xrslam/core/frontend_worker.h>
+#include <xrslam/core/feature_tracker.h>
+#include <xrslam/map/map.h>
+#include <xrslam/map/frame.h>
+#include <xrslam/geometry/stereo.h>
 #include <xrslam/core/place_graph_4dof_shadow.h>
 #include <xrslam/place_recognition.h>
 #include <xrslam/extra/orb_local_descriptor_extractor.h>
@@ -165,6 +169,11 @@ void XRSLAMManager::Init(std::shared_ptr<Config> config) {
     if (dense_requested && (!semantic_enabled_check ||
         std::string(semantic_enabled_check) != "1"))
         throw std::runtime_error("dense semantics require XRSLAM_SEMANTICS_ENABLE=1");
+    const char *a2env = std::getenv("XRSLAM_ASYNC_DEPTH_STAGE_A1");
+    async_depth_enabled_ = config->has_depth() && !config->has_imu() &&
+                           a2env && std::string(a2env) == "1";
+    async_depth_stats_ = {};
+    delayed_depth_queue_.clear();
     detail_ = std::make_unique<XRSLAM::Detail>(config);
     const char *semantic_enable = std::getenv("XRSLAM_SEMANTICS_ENABLE");
     if (semantic_enable && std::string(semantic_enable) == "1") {
@@ -471,6 +480,24 @@ void XRSLAMManager::PushDepth(XRSLAMDepthImage *depth) {
         source = DepthSource::MONOCULAR_RELATIVE;
 
     std::lock_guard<std::mutex> lck(input_mutex_);
+    if (async_depth_enabled_) {
+        ++async_depth_stats_.received;
+        if (!std::isfinite(depth->timeStamp) ||
+            meters.cols != config_->camera_resolution()[0] ||
+            meters.rows != config_->camera_resolution()[1]) {
+            ++async_depth_stats_.rejected;
+            return;
+        }
+        // Bounded, owned copies; no frame/map pointer survives the API call.
+        if (delayed_depth_queue_.size() == 8) {
+            delayed_depth_queue_.pop_front();
+            ++async_depth_stats_.rejected;
+        }
+        delayed_depth_queue_.push_back(
+            DelayedDepth{depth->timeStamp, std::move(meters), source});
+        async_depth_stats_.pending = delayed_depth_queue_.size();
+        return;
+    }
     pending_depth_ = meters;
     pending_depth_timestamp_ = depth->timeStamp;
     pending_depth_source_ = source;
@@ -489,6 +516,70 @@ void XRSLAMManager::PushGyroscope(XRSLAMGyroscope *gyro) {
 void XRSLAMManager::RunOneFrame() {
     std::lock_guard<std::mutex> lck(input_mutex_);
     detail_->track_camera(cur_image_);
+    if (async_depth_enabled_) ProcessDelayedDepthLocked();
+}
+
+bool XRSLAMManager::GetAsyncDepthStats(XRSLAMAsyncDepthStats *out) {
+    if (!out) return false;
+    std::lock_guard<std::mutex> lck(input_mutex_);
+    *out = async_depth_stats_;
+    return true;
+}
+
+void XRSLAMManager::ProcessDelayedDepthLocked() {
+    // Read-only diagnostic association: the FeatureTracker owns the map.
+    // The map lock prevents frame eviction during timestamp lookup/sampling.
+    if (!detail_ || !detail_->feature_tracker ||
+        !detail_->feature_tracker->map) return;
+    auto *map = detail_->feature_tracker->map.get();
+    auto guard = map->lock();
+    if (map->frame_num() == 0) return;
+    constexpr double epsilon = 1.0e-6;
+    const double oldest = map->get_frame(0)->image->t;
+    const double newest = map->get_frame(map->frame_num() - 1)->image->t;
+    std::deque<DelayedDepth> waiting;
+    while (!delayed_depth_queue_.empty()) {
+        DelayedDepth sample = std::move(delayed_depth_queue_.front());
+        delayed_depth_queue_.pop_front();
+        if (sample.timestamp < oldest - epsilon) {
+            ++async_depth_stats_.too_old;
+            continue;
+        }
+        // The source RGB frame may not have reached the tracker yet.
+        if (sample.timestamp > newest + epsilon) {
+            waiting.push_back(std::move(sample));
+            continue;
+        }
+        const Frame *matched = nullptr;
+        for (size_t i = 0; i < map->frame_num(); ++i) {
+            const Frame *candidate = map->get_frame(i);
+            if (std::abs(candidate->image->t - sample.timestamp) < epsilon) {
+                matched = candidate;
+                break;
+            }
+        }
+        if (!matched) {
+            ++async_depth_stats_.unknown;
+            continue;
+        }
+        ++async_depth_stats_.associated;
+        for (size_t i = 0; i < matched->keypoint_num(); ++i) {
+            if (!matched->get_track(i)) continue;
+            ++async_depth_stats_.tracked_feature_samples;
+            const auto pixel = apply_k(matched->get_keypoint(i), matched->K);
+            if (!pixel.allFinite()) continue;
+            const int x = static_cast<int>(std::lround(pixel(0)));
+            const int y = static_cast<int>(std::lround(pixel(1)));
+            if (x < 0 || y < 0 || x >= sample.meters.cols ||
+                y >= sample.meters.rows) continue;
+            const float z = sample.meters.at<float>(y, x);
+            if (std::isfinite(z) && z > 0.05f && z < 50.0f)
+                ++async_depth_stats_.valid_feature_samples;
+        }
+        // Constraints are deliberately NOT modified in Stage A2.
+    }
+    delayed_depth_queue_.swap(waiting);
+    async_depth_stats_.pending = delayed_depth_queue_.size();
 }
 
 void XRSLAMManager::GetResultBodyPose(XRSLAMPose *pose) const {
