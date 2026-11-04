@@ -617,8 +617,9 @@ void FrontendWorker::capture_optimized_depth_snapshots() {
             return;
         for (size_t i = 0; i < frame->keypoint_num(); ++i) {
             const Track *track = frame->get_track(i);
-            if (!track || !track->all_tagged(
-                    TT_VALID, TT_TRIANGULATED, TT_STATIC) ||
+            if (!track || !track->tag(TT_VALID) ||
+                !track->tag(TT_TRIANGULATED) ||
+                !track->tag(TT_STATIC) ||
                 !std::isfinite(track->landmark.inv_depth) ||
                 track->landmark.inv_depth <= 0.0)
                 continue;
