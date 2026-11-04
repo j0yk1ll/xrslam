@@ -176,6 +176,7 @@ void XRSLAMManager::Init(std::shared_ptr<Config> config) {
     async_depth_stats_ = {};
     delayed_depth_queue_.clear();
     geometry_depth_queue_.clear();
+    scale_frame_medians_.clear();
     detail_ = std::make_unique<XRSLAM::Detail>(config);
     const char *semantic_enable = std::getenv("XRSLAM_SEMANTICS_ENABLE");
     if (semantic_enable && std::string(semantic_enable) == "1") {
@@ -640,7 +641,9 @@ void XRSLAMManager::ProcessOptimizedDepthLocked() {
                 sample.timestamp, snapshot)) {
             if (latest_rgb_timestamp - sample.timestamp >
                 max_wait_seconds) {
-                ++async_depth_stats_.geometry_frames_expired;
+                // Not selected for the recent optimized history; this is
+                // expected for many RGB frames and is not a sensor error.
+                ++async_depth_stats_.geometry_frames_unselected;
             } else {
                 waiting.push_back(std::move(sample));
             }
@@ -683,6 +686,26 @@ void XRSLAMManager::ProcessOptimizedDepthLocked() {
             async_depth_stats_.latest_ratio_median = med;
             async_depth_stats_.latest_ratio_mad = median_of(deviations);
             ++async_depth_stats_.ratio_frames;
+
+            // Median of FRAME medians avoids a high-feature-count frame
+            // dominating the estimate. Relative MAD reports consistency,
+            // never grants metric authority by itself.
+            scale_frame_medians_.push_back(med);
+            constexpr size_t max_scale_frames = 32;
+            if (scale_frame_medians_.size() > max_scale_frames)
+                scale_frame_medians_.pop_front();
+            std::vector<double> window(scale_frame_medians_.begin(),
+                                       scale_frame_medians_.end());
+            const double window_med = median_of(window);
+            for (double &value : window)
+                value = std::abs(value - window_med);
+            const double window_mad = median_of(window);
+            async_depth_stats_.scale_window_frames =
+                scale_frame_medians_.size();
+            async_depth_stats_.scale_window_median = window_med;
+            async_depth_stats_.scale_window_mad = window_mad;
+            async_depth_stats_.scale_window_relative_mad =
+                window_med > 0.0 ? window_mad / window_med : 0.0;
         }
         // Read-only. No metric constraints, inverse depth or pose writes.
     }
