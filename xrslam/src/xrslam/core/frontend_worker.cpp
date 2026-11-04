@@ -636,7 +636,13 @@ void FrontendWorker::capture_optimized_depth_snapshots() {
         }
         updates.push_back(std::move(snapshot));
     };
-    for (size_t i = 0; i < map->frame_num(); ++i) {
+    // Stage A3.1: process only the newest three optimized keyframes and
+    // their subframes. Older snapshots already own their values. The full
+    // sliding window previously triggered O(window * features) copying on
+    // every frontend step, even without new optimized RGB observations.
+    const size_t frame_count = map->frame_num();
+    const size_t first = frame_count > 3 ? frame_count - 3 : 0;
+    for (size_t i = first; i < frame_count; ++i) {
         const Frame *frame = map->get_frame(i);
         capture_frame(frame);
         for (const auto &subframe : frame->subframes)
@@ -652,10 +658,15 @@ void FrontendWorker::capture_optimized_depth_snapshots() {
             [&](const OptimizedDepthSnapshot &old) {
                 return std::abs(old.timestamp - update.timestamp) < epsilon;
             });
-        if (it != optimized_depth_history_.end())
-            *it = std::move(update);
-        else
+        if (it != optimized_depth_history_.end()) {
+            // Do not repeatedly rewrite populated observations with a
+            // newer state: Stage A3.1 is descriptive and prioritizes
+            // throughput. Empty snapshots can mature after triangulation.
+            if (it->points.empty() && !update.points.empty())
+                *it = std::move(update);
+        } else {
             optimized_depth_history_.push_back(std::move(update));
+        }
     }
     // Bound all retained observations, including image-free optimizer states.
     constexpr size_t max_snapshots = 128;
