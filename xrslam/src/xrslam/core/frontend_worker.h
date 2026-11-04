@@ -2,6 +2,9 @@
 #define XRSLAM_FRONTEND_WORKER_H
 #include <xrslam/common.h>
 #include <cstdint>
+#include <deque>
+#include <mutex>
+#include <vector>
 #include <xrslam/core/place_graph_4dof_shadow.h>
 #include <xrslam/core/persistent_relocalization_map.h>
 #include <xrslam/core/relocalization_consensus.h>
@@ -29,6 +32,17 @@ struct VerifiedMapLocalization {
     std::string map_id;
 };
 
+// Owned pixel/depth values, never live Frame/Track/Map pointers.
+struct OptimizedDepthObservation {
+    int x = 0;
+    int y = 0;
+    double visual_z = 0.0;
+};
+struct OptimizedDepthSnapshot {
+    double timestamp = 0.0;
+    std::vector<OptimizedDepthObservation> points;
+};
+
 class FrontendWorker : public Worker {
   public:
     FrontendWorker(XRSLAM::Detail *detail, std::shared_ptr<Config> config);
@@ -38,6 +52,12 @@ class FrontendWorker : public Worker {
     void work(std::unique_lock<std::mutex> &l) override;
 
     void issue_frame(Frame *frame);
+
+    // Thread-safe, bounded copies from the optimized sliding-window map.
+    // The depth adapter never dereferences frontend-owned geometry.
+    bool copy_optimized_depth_snapshot(double timestamp,
+                                       OptimizedDepthSnapshot &out) const;
+    size_t optimized_depth_snapshot_count() const;
 
     size_t create_virtual_object();
     OutputObject get_virtual_object_pose_by_id(size_t id);
@@ -73,6 +93,10 @@ class FrontendWorker : public Worker {
     std::unique_ptr<Localizer> localizer;
 
   private:
+    void capture_optimized_depth_snapshots();
+    void clear_optimized_depth_snapshots();
+    mutable std::mutex optimized_depth_mutex_;
+    std::deque<OptimizedDepthSnapshot> optimized_depth_history_;
     std::deque<size_t> pending_frame_ids;
 
     XRSLAM::Detail *detail;
