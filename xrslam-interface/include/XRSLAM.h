@@ -271,6 +271,12 @@ typedef struct XRSLAMAsyncDepthStats {
     uint64_t geometry_frames_matched;
     uint64_t geometry_frames_expired;
     uint64_t geometry_pending;
+    /* Stage A3.1: bounded rolling scale statistics (diagnostic only). */
+    uint64_t geometry_frames_unselected;
+    uint64_t scale_window_frames;
+    double scale_window_median;
+    double scale_window_mad;
+    double scale_window_relative_mad;
 } XRSLAMAsyncDepthStats;
 int XRSLAMGetAsyncDepthStats(XRSLAMAsyncDepthStats *out);
 
