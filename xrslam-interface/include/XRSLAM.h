@@ -258,6 +258,15 @@ typedef struct XRSLAMAsyncDepthStats {
     uint64_t tracked_feature_samples;
     uint64_t constraints_added;
     uint64_t pending;
+    /* Stage A3: descriptive statistics, not a scale calibration result. */
+    uint64_t geometry_samples;   /* finite, positive triangulated camera Z */
+    uint64_t ratio_samples;      /* depth prediction / visual camera Z */
+    uint64_t ratio_frames;       /* associated frames with >= 10 ratios */
+    double depth_min_m;         /* over valid feature samples since create */
+    double depth_max_m;
+    double latest_depth_median_m; /* last associated frame with valid samples */
+    double latest_ratio_median;  /* last frame with >= 10 geometry ratios */
+    double latest_ratio_mad;     /* median absolute ratio deviation */
 } XRSLAMAsyncDepthStats;
 int XRSLAMGetAsyncDepthStats(XRSLAMAsyncDepthStats *out);
 
