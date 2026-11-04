@@ -246,6 +246,21 @@ void XRSLAMPushSensorData(XRSLAMSensorType sensor_type, void *sensor_data);
  */
 void XRSLAMRunOneFrame();
 
+/* Stage A2: diagnostic-only delayed depth. Counters reset at XRSLAMCreate.
+ * No depth priors are added and no metric pose authority is implied. */
+typedef struct XRSLAMAsyncDepthStats {
+    uint64_t received;
+    uint64_t associated;
+    uint64_t too_old;
+    uint64_t unknown;
+    uint64_t rejected;
+    uint64_t valid_feature_samples;
+    uint64_t tracked_feature_samples;
+    uint64_t constraints_added;
+    uint64_t pending;
+} XRSLAMAsyncDepthStats;
+int XRSLAMGetAsyncDepthStats(XRSLAMAsyncDepthStats *out);
+
 void XRSLAMSetViewer(void *viewer);
 
 /**
