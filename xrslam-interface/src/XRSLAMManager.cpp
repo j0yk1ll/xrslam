@@ -177,6 +177,7 @@ void XRSLAMManager::Init(std::shared_ptr<Config> config) {
     delayed_depth_queue_.clear();
     geometry_depth_queue_.clear();
     scale_frame_medians_.clear();
+    candidate_frame_medians_.clear();
     detail_ = std::make_unique<XRSLAM::Detail>(config);
     const char *semantic_enable = std::getenv("XRSLAM_SEMANTICS_ENABLE");
     if (semantic_enable && std::string(semantic_enable) == "1") {
@@ -677,6 +678,82 @@ void XRSLAMManager::ProcessOptimizedDepthLocked() {
             ratios.push_back(ratio);
             ++async_depth_stats_.ratio_samples;
         }
+        const size_t usable_ratio_count = ratios.size();
+        if (usable_ratio_count == 0)
+            ++async_depth_stats_.geometry_frames_zero_ratios;
+        else if (usable_ratio_count < 4)
+            ++async_depth_stats_.geometry_frames_1_to_3_ratios;
+        else if (usable_ratio_count < 10)
+            ++async_depth_stats_.geometry_frames_4_to_9_ratios;
+        else
+            ++async_depth_stats_.geometry_frames_10_plus_ratios;
+
+        // A4.1: independent low-density candidate estimator. Do not alter
+        // Stage A3 ratio_frames, per-frame median or 32-frame statistics.
+        // Pixels outside a factor-4 envelope around their own frame median
+        // are obvious disagreements; remaining variability is measured.
+        if (usable_ratio_count >= 4) {
+            std::vector<double> raw_ratios = ratios;
+            const double raw_median = median_of(raw_ratios);
+            std::vector<double> trimmed;
+            trimmed.reserve(ratios.size());
+            for (double value : ratios) {
+                if (value >= raw_median * 0.25 &&
+                    value <= raw_median * 4.0)
+                    trimmed.push_back(value);
+            }
+            if (trimmed.size() >= 4) {
+                const double candidate_med = median_of(trimmed);
+                std::vector<double> differences;
+                differences.reserve(trimmed.size());
+                for (double value : trimmed)
+                    differences.push_back(std::abs(value - candidate_med));
+                const double candidate_mad = median_of(differences);
+                if (std::isfinite(candidate_med) &&
+                    candidate_med >= 0.001 && candidate_med <= 100.0 &&
+                    candidate_mad / candidate_med <= 0.75) {
+                    // A large scale jump is a different visual gauge or a
+                    // gross inconsistency, not an inlier to average.
+                    // Start a fresh consecutive-candidate segment.
+                    if (!candidate_frame_medians_.empty()) {
+                        std::vector<double> history(
+                            candidate_frame_medians_.begin(),
+                            candidate_frame_medians_.end());
+                        const double prior = median_of(history);
+                        if (candidate_med < prior / 2.0 ||
+                            candidate_med > prior * 2.0) {
+                            candidate_frame_medians_.clear();
+                            ++async_depth_stats_.candidate_scale_resets;
+                        }
+                    }
+                    candidate_frame_medians_.push_back(candidate_med);
+                    constexpr size_t candidate_capacity = 16;
+                    if (candidate_frame_medians_.size() > candidate_capacity)
+                        candidate_frame_medians_.pop_front();
+                    std::vector<double> window(
+                        candidate_frame_medians_.begin(),
+                        candidate_frame_medians_.end());
+                    const double window_median = median_of(window);
+                    for (double &value : window)
+                        value = std::abs(value - window_median);
+                    const double window_mad = median_of(window);
+                    async_depth_stats_.candidate_window_frames =
+                        candidate_frame_medians_.size();
+                    async_depth_stats_.candidate_window_median =
+                        window_median;
+                    async_depth_stats_.candidate_window_mad =
+                        window_mad;
+                    async_depth_stats_.candidate_window_relative_mad =
+                        window_median > 0.0 ? window_mad / window_median : 0.0;
+                    ++async_depth_stats_.candidate_frames_accepted;
+                } else {
+                    ++async_depth_stats_.candidate_frames_rejected_noisy;
+                }
+            } else {
+                ++async_depth_stats_.candidate_frames_rejected_noisy;
+            }
+        }
+
         if (ratios.size() >= 10) {
             const double med = median_of(ratios);
             std::vector<double> deviations;
