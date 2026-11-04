@@ -277,6 +277,18 @@ typedef struct XRSLAMAsyncDepthStats {
     double scale_window_median;
     double scale_window_mad;
     double scale_window_relative_mad;
+    /* A4.1 diagnostic-only candidate selection; independent of A3 counters. */
+    uint64_t geometry_frames_zero_ratios;
+    uint64_t geometry_frames_1_to_3_ratios;
+    uint64_t geometry_frames_4_to_9_ratios;
+    uint64_t geometry_frames_10_plus_ratios;
+    uint64_t candidate_frames_accepted;
+    uint64_t candidate_frames_rejected_noisy;
+    uint64_t candidate_scale_resets;
+    uint64_t candidate_window_frames;
+    double candidate_window_median;
+    double candidate_window_mad;
+    double candidate_window_relative_mad;
 } XRSLAMAsyncDepthStats;
 int XRSLAMGetAsyncDepthStats(XRSLAMAsyncDepthStats *out);
 
