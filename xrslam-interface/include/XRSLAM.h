@@ -267,6 +267,10 @@ typedef struct XRSLAMAsyncDepthStats {
     double latest_depth_median_m; /* last associated frame with valid samples */
     double latest_ratio_median;  /* last frame with >= 10 geometry ratios */
     double latest_ratio_mad;     /* median absolute ratio deviation */
+    uint64_t optimized_snapshots;
+    uint64_t geometry_frames_matched;
+    uint64_t geometry_frames_expired;
+    uint64_t geometry_pending;
 } XRSLAMAsyncDepthStats;
 int XRSLAMGetAsyncDepthStats(XRSLAMAsyncDepthStats *out);
 
