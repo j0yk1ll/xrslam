@@ -2,6 +2,7 @@
 #define XRSLAM_SLAMMANAGER_H
 
 #include <iostream>
+#include <deque>
 #include <opencv2/opencv.hpp>
 
 #include "xrslam/inspection.h"
@@ -30,6 +31,7 @@ class XRSLAMManager {
     void PushGyroscope(XRSLAMGyroscope *gyro);
 
     void RunOneFrame();
+    bool GetAsyncDepthStats(XRSLAMAsyncDepthStats *out);
 
     void Destroy();
 
@@ -65,6 +67,15 @@ class XRSLAMManager {
     cv::Mat pending_depth_;
     double pending_depth_timestamp_ = -1.0;
     DepthSource pending_depth_source_ = DepthSource::SENSOR_METRIC;
+    struct DelayedDepth {
+        double timestamp = 0.0;
+        cv::Mat meters;
+        DepthSource source = DepthSource::MONOCULAR_METRIC;
+    };
+    std::deque<DelayedDepth> delayed_depth_queue_;
+    XRSLAMAsyncDepthStats async_depth_stats_{};
+    bool async_depth_enabled_ = false;
+    void ProcessDelayedDepthLocked();
 };
 } // namespace xrslam
 #endif
