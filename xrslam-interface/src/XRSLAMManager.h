@@ -73,9 +73,12 @@ class XRSLAMManager {
         DepthSource source = DepthSource::MONOCULAR_METRIC;
     };
     std::deque<DelayedDepth> delayed_depth_queue_;
+    // Separate A3 work queue: A2 RGB association and counters are unchanged.
+    std::deque<DelayedDepth> geometry_depth_queue_;
     XRSLAMAsyncDepthStats async_depth_stats_{};
     bool async_depth_enabled_ = false;
     void ProcessDelayedDepthLocked();
+    void ProcessOptimizedDepthLocked();
 };
 } // namespace xrslam
 #endif
