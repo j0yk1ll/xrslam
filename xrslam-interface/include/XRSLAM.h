@@ -289,6 +289,15 @@ typedef struct XRSLAMAsyncDepthStats {
     double candidate_window_median;
     double candidate_window_mad;
     double candidate_window_relative_mad;
+    /* A7.1: read-only optimized-geometry pipeline observability.
+     * Queue evictions and empty optimized snapshots are distinct. The
+     * timestamp is in the same camera acquisition-clock domain as RGB. */
+    uint64_t geometry_queue_evictions;
+    uint64_t geometry_empty_snapshot_expirations;
+    uint64_t geometry_empty_snapshot_waits;
+    uint64_t geometry_missing_snapshot_waits;
+    double latest_geometry_matched_timestamp_s;
+    double latest_rgb_timestamp_s;
 } XRSLAMAsyncDepthStats;
 int XRSLAMGetAsyncDepthStats(XRSLAMAsyncDepthStats *out);
 
