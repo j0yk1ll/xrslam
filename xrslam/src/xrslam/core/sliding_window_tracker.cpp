@@ -3711,19 +3711,46 @@ bool SlidingWindowTracker::track() {
     }
 
 
-    inspect_debug(sliding_window_landmarks, landmarks) {
+    inspect(sliding_window_landmarks, landmarks) {
         std::vector<Landmark> points;
-        points.reserve(map->track_num());
-        for (size_t i = 0; i < map->track_num(); ++i) {
+        const size_t total_tracks = map->track_num();
+        points.reserve(total_tracks);
+        size_t valid_tracks = 0;
+        size_t triangulated_tracks = 0;
+        size_t valid_triangulated_tracks = 0;
+        for (size_t i = 0; i < total_tracks; ++i) {
             if (Track *track = map->get_track(i)) {
-                if (track->tag(TT_VALID)) {
+                const bool valid = track->tag(TT_VALID);
+                const bool triangulated = track->tag(TT_TRIANGULATED);
+                if (valid) ++valid_tracks;
+                if (triangulated) ++triangulated_tracks;
+                if (valid && triangulated) ++valid_triangulated_tracks;
+                if (valid) {
                     Landmark point;
                     point.p = track->get_landmark_point();
-                    point.triangulated = track->tag(TT_TRIANGULATED);
+                    point.triangulated = triangulated;
+                    point.track_id = static_cast<uint64_t>(track->id());
                     points.push_back(point);
                 }
             }
         }
+
+        // Report transitions and periodic counts without retaining stale
+        // geometry or generating synthetic landmarks.
+        static size_t snapshot_count = 0;
+        static bool previous_empty = true;
+        const bool empty = points.empty();
+        ++snapshot_count;
+        if (snapshot_count == 1 || empty != previous_empty ||
+            snapshot_count % 120 == 0) {
+            std::fprintf(stderr,
+                "[XRSLAM][landmark_snapshot] tracks=%zu valid=%zu "
+                "triangulated=%zu valid_triangulated=%zu exported=%zu "
+                "frames=%zu\n",
+                total_tracks, valid_tracks, triangulated_tracks,
+                valid_triangulated_tracks, points.size(), map->frame_num());
+        }
+        previous_empty = empty;
         landmarks = std::move(points);
     }
 

@@ -1,3 +1,6 @@
+#include <cstdlib>
+#include <string>
+
 #include <xrslam/core/detail.h>
 #include <xrslam/core/feature_tracker.h>
 #include <xrslam/core/initializer.h>
@@ -143,7 +146,7 @@ std::unique_ptr<SlidingWindowTracker> Initializer::initialize() {
         map->get_frame(i)->tag(FT_KEYFRAME) = true;
     }
 
-    inspect_debug(sliding_window_landmarks, landmarks) {
+    inspect(sliding_window_landmarks, landmarks) {
         std::vector<Landmark> points;
         points.reserve(map->track_num());
         for (size_t i = 0; i < map->track_num(); ++i) {
@@ -152,6 +155,7 @@ std::unique_ptr<SlidingWindowTracker> Initializer::initialize() {
                     Landmark point;
                     point.p = track->get_landmark_point();
                     point.triangulated = track->tag(TT_TRIANGULATED);
+                    point.track_id = static_cast<uint64_t>(track->id());
                     points.push_back(point);
                 }
             }
@@ -350,7 +354,14 @@ bool Initializer::init_sfm() {
     // does not retain a scale nullspace or drive all depths toward infinity.
     // Keep the anchor tag on the track so subsequent visual-only solves retain
     // the same scale gauge while that landmark remains in the map.
-    if (!config->has_imu() && !config->has_depth()) {
+    // Stage A1 intentionally runs the RGB-D configuration without applying
+    // depth priors. It therefore has the same unobservable scale gauge as
+    // monocular SfM and needs the same inverse-depth anchor.
+    const char *async_depth_env = std::getenv("XRSLAM_ASYNC_DEPTH_STAGE_A1");
+    const bool visual_only_stage_a1 =
+        config->has_depth() && !config->has_imu() && async_depth_env &&
+        std::string(async_depth_env) == "1";
+    if (!config->has_imu() && (!config->has_depth() || visual_only_stage_a1)) {
         Track *scale_anchor = nullptr;
         double scale_anchor_inv_depth = 0.0;
         for (size_t i = 0; i < map->track_num(); ++i) {

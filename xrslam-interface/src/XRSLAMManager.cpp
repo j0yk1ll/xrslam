@@ -1,6 +1,11 @@
 #include "XRSLAMManager.h"
 
 #include <xrslam/core/frontend_worker.h>
+#include <xrslam/core/feature_tracker.h>
+#include <xrslam/map/map.h>
+#include <xrslam/map/frame.h>
+#include <xrslam/map/track.h>
+#include <xrslam/geometry/stereo.h>
 #include <xrslam/core/place_graph_4dof_shadow.h>
 #include <xrslam/place_recognition.h>
 #include <xrslam/extra/orb_local_descriptor_extractor.h>
@@ -165,6 +170,14 @@ void XRSLAMManager::Init(std::shared_ptr<Config> config) {
     if (dense_requested && (!semantic_enabled_check ||
         std::string(semantic_enabled_check) != "1"))
         throw std::runtime_error("dense semantics require XRSLAM_SEMANTICS_ENABLE=1");
+    const char *a2env = std::getenv("XRSLAM_ASYNC_DEPTH_STAGE_A1");
+    async_depth_enabled_ = config->has_depth() && !config->has_imu() &&
+                           a2env && std::string(a2env) == "1";
+    async_depth_stats_ = {};
+    delayed_depth_queue_.clear();
+    geometry_depth_queue_.clear();
+    scale_frame_medians_.clear();
+    candidate_frame_medians_.clear();
     detail_ = std::make_unique<XRSLAM::Detail>(config);
     const char *semantic_enable = std::getenv("XRSLAM_SEMANTICS_ENABLE");
     if (semantic_enable && std::string(semantic_enable) == "1") {
@@ -471,6 +484,24 @@ void XRSLAMManager::PushDepth(XRSLAMDepthImage *depth) {
         source = DepthSource::MONOCULAR_RELATIVE;
 
     std::lock_guard<std::mutex> lck(input_mutex_);
+    if (async_depth_enabled_) {
+        ++async_depth_stats_.received;
+        if (!std::isfinite(depth->timeStamp) ||
+            meters.cols != config_->camera_resolution()[0] ||
+            meters.rows != config_->camera_resolution()[1]) {
+            ++async_depth_stats_.rejected;
+            return;
+        }
+        // Bounded, owned copies; no frame/map pointer survives the API call.
+        if (delayed_depth_queue_.size() == 8) {
+            delayed_depth_queue_.pop_front();
+            ++async_depth_stats_.rejected;
+        }
+        delayed_depth_queue_.push_back(
+            DelayedDepth{depth->timeStamp, std::move(meters), source});
+        async_depth_stats_.pending = delayed_depth_queue_.size();
+        return;
+    }
     pending_depth_ = meters;
     pending_depth_timestamp_ = depth->timeStamp;
     pending_depth_source_ = source;
@@ -489,6 +520,281 @@ void XRSLAMManager::PushGyroscope(XRSLAMGyroscope *gyro) {
 void XRSLAMManager::RunOneFrame() {
     std::lock_guard<std::mutex> lck(input_mutex_);
     detail_->track_camera(cur_image_);
+    if (async_depth_enabled_) ProcessDelayedDepthLocked();
+}
+
+bool XRSLAMManager::GetAsyncDepthStats(XRSLAMAsyncDepthStats *out) {
+    if (!out) return false;
+    std::lock_guard<std::mutex> lck(input_mutex_);
+    *out = async_depth_stats_;
+    if (detail_ && detail_->frontend)
+        out->optimized_snapshots =
+            detail_->frontend->optimized_depth_snapshot_count();
+    return true;
+}
+
+namespace {
+double median_of(std::vector<double> &v) {
+    const size_t mid = v.size() / 2;
+    std::nth_element(v.begin(), v.begin() + mid, v.end());
+    const double upper = v[mid];
+    if (v.size() % 2 != 0) return upper;
+    std::nth_element(v.begin(), v.begin() + mid - 1, v.begin() + mid);
+    return 0.5 * (upper + v[mid - 1]);
+}
+} // namespace
+
+void XRSLAMManager::ProcessDelayedDepthLocked() {
+    // Stage A2 RGB-frame association remains separate from the optimized
+    // Stage A3 geometry queue. Never keep a live Frame/Track pointer.
+    if (!detail_ || !detail_->feature_tracker ||
+        !detail_->feature_tracker->map) return;
+    auto *map = detail_->feature_tracker->map.get();
+    {
+        auto guard = map->lock();
+        if (map->frame_num() != 0) {
+            constexpr double epsilon = 1.0e-6;
+            const double oldest = map->get_frame(0)->image->t;
+            const double newest =
+                map->get_frame(map->frame_num() - 1)->image->t;
+            std::deque<DelayedDepth> waiting;
+            while (!delayed_depth_queue_.empty()) {
+                DelayedDepth sample = std::move(delayed_depth_queue_.front());
+                delayed_depth_queue_.pop_front();
+                if (sample.timestamp < oldest - epsilon) {
+                    ++async_depth_stats_.too_old;
+                    continue;
+                }
+                if (sample.timestamp > newest + epsilon) {
+                    waiting.push_back(std::move(sample));
+                    continue;
+                }
+                const Frame *matched = nullptr;
+                for (size_t i = 0; i < map->frame_num(); ++i) {
+                    const Frame *candidate = map->get_frame(i);
+                    if (std::abs(candidate->image->t - sample.timestamp) <
+                        epsilon) {
+                        matched = candidate;
+                        break;
+                    }
+                }
+                if (!matched) {
+                    ++async_depth_stats_.unknown;
+                    continue;
+                }
+                ++async_depth_stats_.associated;
+                std::vector<double> valid_depths;
+                for (size_t i = 0; i < matched->keypoint_num(); ++i) {
+                    if (!matched->get_track(i)) continue;
+                    ++async_depth_stats_.tracked_feature_samples;
+                    const auto pixel =
+                        apply_k(matched->get_keypoint(i), matched->K);
+                    if (!pixel.allFinite()) continue;
+                    const int x = static_cast<int>(std::lround(pixel(0)));
+                    const int y = static_cast<int>(std::lround(pixel(1)));
+                    if (x < 0 || y < 0 || x >= sample.meters.cols ||
+                        y >= sample.meters.rows) continue;
+                    const float z = sample.meters.at<float>(y, x);
+                    if (!std::isfinite(z) || z <= 0.05f || z >= 50.0f)
+                        continue;
+                    ++async_depth_stats_.valid_feature_samples;
+                    valid_depths.push_back(z);
+                    if (async_depth_stats_.depth_min_m == 0.0 ||
+                        z < async_depth_stats_.depth_min_m)
+                        async_depth_stats_.depth_min_m = z;
+                    async_depth_stats_.depth_max_m =
+                        std::max(async_depth_stats_.depth_max_m,
+                                 static_cast<double>(z));
+                }
+                if (!valid_depths.empty())
+                    async_depth_stats_.latest_depth_median_m =
+                        median_of(valid_depths);
+
+                // Transfer the owned depth image, not a pointer to the
+                // continuous tracker. Optimized snapshots arrive later.
+                constexpr size_t max_geometry_queue = 16;
+                if (geometry_depth_queue_.size() >= max_geometry_queue) {
+                    geometry_depth_queue_.pop_front();
+                    ++async_depth_stats_.geometry_frames_expired;
+                    ++async_depth_stats_.geometry_queue_evictions;
+                }
+                geometry_depth_queue_.push_back(std::move(sample));
+            }
+            delayed_depth_queue_.swap(waiting);
+        }
+        async_depth_stats_.pending = delayed_depth_queue_.size();
+    }
+    // No FeatureTracker map lock is held while obtaining frontend snapshots.
+    ProcessOptimizedDepthLocked();
+}
+
+void XRSLAMManager::ProcessOptimizedDepthLocked() {
+    if (!detail_ || !detail_->frontend || !cur_image_) return;
+    const double latest_rgb_timestamp = cur_image_->t;
+    if (!std::isfinite(latest_rgb_timestamp)) return;
+    async_depth_stats_.latest_rgb_timestamp_s = latest_rgb_timestamp;
+    constexpr double max_wait_seconds = 6.0;
+    std::deque<DelayedDepth> waiting;
+    while (!geometry_depth_queue_.empty()) {
+        DelayedDepth sample = std::move(geometry_depth_queue_.front());
+        geometry_depth_queue_.pop_front();
+
+        OptimizedDepthSnapshot snapshot;
+        if (!detail_->frontend->copy_optimized_depth_snapshot(
+                sample.timestamp, snapshot)) {
+            if (latest_rgb_timestamp - sample.timestamp >
+                max_wait_seconds) {
+                // Not selected for the recent optimized history; this is
+                // expected for many RGB frames and is not a sensor error.
+                ++async_depth_stats_.geometry_frames_unselected;
+            } else {
+                ++async_depth_stats_.geometry_missing_snapshot_waits;
+                waiting.push_back(std::move(sample));
+            }
+            continue;
+        }
+        // A snapshot without triangulated observations may be replaced by a
+        // later optimized version, so allow it to mature until expiry.
+        if (snapshot.points.empty()) {
+            if (latest_rgb_timestamp - sample.timestamp >
+                max_wait_seconds) {
+                ++async_depth_stats_.geometry_frames_expired;
+                ++async_depth_stats_.geometry_empty_snapshot_expirations;
+            } else {
+                ++async_depth_stats_.geometry_empty_snapshot_waits;
+                waiting.push_back(std::move(sample));
+            }
+            continue;
+        }
+        async_depth_stats_.latest_geometry_matched_timestamp_s = sample.timestamp;
+        ++async_depth_stats_.geometry_frames_matched;
+        std::vector<double> ratios;
+        for (const auto &obs : snapshot.points) {
+            if (!std::isfinite(obs.visual_z) || obs.visual_z <= 0.05 ||
+                obs.x < 0 || obs.y < 0 ||
+                obs.x >= sample.meters.cols ||
+                obs.y >= sample.meters.rows)
+                continue;
+            const float depth = sample.meters.at<float>(obs.y, obs.x);
+            if (!std::isfinite(depth) || depth <= 0.05f ||
+                depth >= 50.0f)
+                continue;
+            ++async_depth_stats_.geometry_samples;
+            const double ratio = static_cast<double>(depth) / obs.visual_z;
+            if (!std::isfinite(ratio) || ratio <= 0.0) continue;
+            ratios.push_back(ratio);
+            ++async_depth_stats_.ratio_samples;
+        }
+        const size_t usable_ratio_count = ratios.size();
+        if (usable_ratio_count == 0)
+            ++async_depth_stats_.geometry_frames_zero_ratios;
+        else if (usable_ratio_count < 4)
+            ++async_depth_stats_.geometry_frames_1_to_3_ratios;
+        else if (usable_ratio_count < 10)
+            ++async_depth_stats_.geometry_frames_4_to_9_ratios;
+        else
+            ++async_depth_stats_.geometry_frames_10_plus_ratios;
+
+        // A4.1: independent low-density candidate estimator. Do not alter
+        // Stage A3 ratio_frames, per-frame median or 32-frame statistics.
+        // Pixels outside a factor-4 envelope around their own frame median
+        // are obvious disagreements; remaining variability is measured.
+        if (usable_ratio_count >= 4) {
+            std::vector<double> raw_ratios = ratios;
+            const double raw_median = median_of(raw_ratios);
+            std::vector<double> trimmed;
+            trimmed.reserve(ratios.size());
+            for (double value : ratios) {
+                if (value >= raw_median * 0.25 &&
+                    value <= raw_median * 4.0)
+                    trimmed.push_back(value);
+            }
+            if (trimmed.size() >= 4) {
+                const double candidate_med = median_of(trimmed);
+                std::vector<double> differences;
+                differences.reserve(trimmed.size());
+                for (double value : trimmed)
+                    differences.push_back(std::abs(value - candidate_med));
+                const double candidate_mad = median_of(differences);
+                if (std::isfinite(candidate_med) &&
+                    candidate_med >= 0.001 && candidate_med <= 100.0 &&
+                    candidate_mad / candidate_med <= 0.75) {
+                    // A large scale jump is a different visual gauge or a
+                    // gross inconsistency, not an inlier to average.
+                    // Start a fresh consecutive-candidate segment.
+                    if (!candidate_frame_medians_.empty()) {
+                        std::vector<double> history(
+                            candidate_frame_medians_.begin(),
+                            candidate_frame_medians_.end());
+                        const double prior = median_of(history);
+                        if (candidate_med < prior / 2.0 ||
+                            candidate_med > prior * 2.0) {
+                            candidate_frame_medians_.clear();
+                            ++async_depth_stats_.candidate_scale_resets;
+                        }
+                    }
+                    candidate_frame_medians_.push_back(candidate_med);
+                    constexpr size_t candidate_capacity = 16;
+                    if (candidate_frame_medians_.size() > candidate_capacity)
+                        candidate_frame_medians_.pop_front();
+                    std::vector<double> window(
+                        candidate_frame_medians_.begin(),
+                        candidate_frame_medians_.end());
+                    const double window_median = median_of(window);
+                    for (double &value : window)
+                        value = std::abs(value - window_median);
+                    const double window_mad = median_of(window);
+                    async_depth_stats_.candidate_window_frames =
+                        candidate_frame_medians_.size();
+                    async_depth_stats_.candidate_window_median =
+                        window_median;
+                    async_depth_stats_.candidate_window_mad =
+                        window_mad;
+                    async_depth_stats_.candidate_window_relative_mad =
+                        window_median > 0.0 ? window_mad / window_median : 0.0;
+                    ++async_depth_stats_.candidate_frames_accepted;
+                } else {
+                    ++async_depth_stats_.candidate_frames_rejected_noisy;
+                }
+            } else {
+                ++async_depth_stats_.candidate_frames_rejected_noisy;
+            }
+        }
+
+        if (ratios.size() >= 10) {
+            const double med = median_of(ratios);
+            std::vector<double> deviations;
+            deviations.reserve(ratios.size());
+            for (double ratio : ratios)
+                deviations.push_back(std::abs(ratio - med));
+            async_depth_stats_.latest_ratio_median = med;
+            async_depth_stats_.latest_ratio_mad = median_of(deviations);
+            ++async_depth_stats_.ratio_frames;
+
+            // Median of FRAME medians avoids a high-feature-count frame
+            // dominating the estimate. Relative MAD reports consistency,
+            // never grants metric authority by itself.
+            scale_frame_medians_.push_back(med);
+            constexpr size_t max_scale_frames = 32;
+            if (scale_frame_medians_.size() > max_scale_frames)
+                scale_frame_medians_.pop_front();
+            std::vector<double> window(scale_frame_medians_.begin(),
+                                       scale_frame_medians_.end());
+            const double window_med = median_of(window);
+            for (double &value : window)
+                value = std::abs(value - window_med);
+            const double window_mad = median_of(window);
+            async_depth_stats_.scale_window_frames =
+                scale_frame_medians_.size();
+            async_depth_stats_.scale_window_median = window_med;
+            async_depth_stats_.scale_window_mad = window_mad;
+            async_depth_stats_.scale_window_relative_mad =
+                window_med > 0.0 ? window_mad / window_med : 0.0;
+        }
+        // Read-only. No metric constraints, inverse depth or pose writes.
+    }
+    geometry_depth_queue_.swap(waiting);
+    async_depth_stats_.geometry_pending = geometry_depth_queue_.size();
 }
 
 void XRSLAMManager::GetResultBodyPose(XRSLAMPose *pose) const {
@@ -597,20 +903,39 @@ void XRSLAMManager::GetResultState(XRSLAMState *state) const {
     }
 }
 void XRSLAMManager::GetResultLandmarks(XRSLAMLandmarks *landmarks) const {
-    inspect_debug(sliding_window_landmarks, swlandmarks) {
+    if (!landmarks) return;
+    landmarks->num_landmarks = 0;
+    landmarks->landmarks = nullptr;
+    inspect(sliding_window_landmarks, swlandmarks) {
+        if (!swlandmarks.has_value()) return;
         auto pts = std::any_cast<std::vector<xrslam::Landmark>>(swlandmarks);
-        landmarks->num_landmarks = pts.size();
+        if (pts.empty()) return;
+        landmarks->num_landmarks = static_cast<int>(pts.size());
         landmarks->landmarks = new XRSLAMLandmark[pts.size()];
         for (int i = 0; i < pts.size(); i++) {
             xrslam::vector<3> cur_p = pts[i].p;
             landmarks->landmarks[i].x = cur_p(0);
             landmarks->landmarks[i].y = cur_p(1);
             landmarks->landmarks[i].z = cur_p(2);
+            landmarks->landmarks[i].track_id = pts[i].track_id;
+            landmarks->landmarks[i].triangulated = pts[i].triangulated ? 1 : 0;
         }
     }
 }
 
-void XRSLAMManager::GetResultFeatures(XRSLAMFeatures *features) const {}
+void XRSLAMManager::GetResultFeatures(XRSLAMFeatures *features) const {
+    if (!features) return;
+    features->pos.clear();
+    inspect(feature_tracker_tracked_pixels, tracked_pixels) {
+        if (tracked_pixels.has_value()) {
+            auto pixels = std::any_cast<std::vector<std::pair<double, double>>>(
+                tracked_pixels);
+            features->pos.reserve(pixels.size());
+            for (const auto &p : pixels)
+                features->pos.push_back({p.first, p.second});
+        }
+    }
+}
 
 void XRSLAMManager::GetResultBias(XRSLAMIMUBias *bias) const {
     inspect_debug(sliding_window_current_bg, bg) {

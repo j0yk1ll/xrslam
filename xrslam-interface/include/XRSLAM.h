@@ -168,6 +168,10 @@ typedef enum XRSLAMState {
  */
 typedef struct XRSLAMLandmark {
     double x, y, z;
+    /* Native track identity, unique within one XRSLAM tracking session. */
+    uint64_t track_id;
+    /* Only triangulated landmarks may enter a persistent 3D map. */
+    uint8_t triangulated;
 } XRSLAMLandmark;
 typedef struct XRSLAMLandmarks {
     XRSLAMLandmark *landmarks;
@@ -241,6 +245,61 @@ void XRSLAMPushSensorData(XRSLAMSensorType sensor_type, void *sensor_data);
  * @brief end one frame input and run slam
  */
 void XRSLAMRunOneFrame();
+
+/* Stage A2: diagnostic-only delayed depth. Counters reset at XRSLAMCreate.
+ * No depth priors are added and no metric pose authority is implied. */
+typedef struct XRSLAMAsyncDepthStats {
+    uint64_t received;
+    uint64_t associated;
+    uint64_t too_old;
+    uint64_t unknown;
+    uint64_t rejected;
+    uint64_t valid_feature_samples;
+    uint64_t tracked_feature_samples;
+    uint64_t constraints_added;
+    uint64_t pending;
+    /* Stage A3: descriptive statistics, not a scale calibration result. */
+    uint64_t geometry_samples;   /* finite, positive triangulated camera Z */
+    uint64_t ratio_samples;      /* depth prediction / visual camera Z */
+    uint64_t ratio_frames;       /* associated frames with >= 10 ratios */
+    double depth_min_m;         /* over valid feature samples since create */
+    double depth_max_m;
+    double latest_depth_median_m; /* last associated frame with valid samples */
+    double latest_ratio_median;  /* last frame with >= 10 geometry ratios */
+    double latest_ratio_mad;     /* median absolute ratio deviation */
+    uint64_t optimized_snapshots;
+    uint64_t geometry_frames_matched;
+    uint64_t geometry_frames_expired;
+    uint64_t geometry_pending;
+    /* Stage A3.1: bounded rolling scale statistics (diagnostic only). */
+    uint64_t geometry_frames_unselected;
+    uint64_t scale_window_frames;
+    double scale_window_median;
+    double scale_window_mad;
+    double scale_window_relative_mad;
+    /* A4.1 diagnostic-only candidate selection; independent of A3 counters. */
+    uint64_t geometry_frames_zero_ratios;
+    uint64_t geometry_frames_1_to_3_ratios;
+    uint64_t geometry_frames_4_to_9_ratios;
+    uint64_t geometry_frames_10_plus_ratios;
+    uint64_t candidate_frames_accepted;
+    uint64_t candidate_frames_rejected_noisy;
+    uint64_t candidate_scale_resets;
+    uint64_t candidate_window_frames;
+    double candidate_window_median;
+    double candidate_window_mad;
+    double candidate_window_relative_mad;
+    /* A7.1: read-only optimized-geometry pipeline observability.
+     * Queue evictions and empty optimized snapshots are distinct. The
+     * timestamp is in the same camera acquisition-clock domain as RGB. */
+    uint64_t geometry_queue_evictions;
+    uint64_t geometry_empty_snapshot_expirations;
+    uint64_t geometry_empty_snapshot_waits;
+    uint64_t geometry_missing_snapshot_waits;
+    double latest_geometry_matched_timestamp_s;
+    double latest_rgb_timestamp_s;
+} XRSLAMAsyncDepthStats;
+int XRSLAMGetAsyncDepthStats(XRSLAMAsyncDepthStats *out);
 
 void XRSLAMSetViewer(void *viewer);
 

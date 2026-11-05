@@ -158,13 +158,21 @@ Pose XRSLAM::Detail::track_accelerometer(const double &t, const double &x,
 }
 
 Pose XRSLAM::Detail::track_camera(std::shared_ptr<Image> image) {
-    runtime_assert(!config->has_depth() || image->has_depth(),
+    // Stage A1 is explicitly opt-in. While enabled, depth is NOT used by the
+    // estimator: first establish uninterrupted visual tracking and a stable
+    // monocular scale gauge before introducing delayed-depth constraints.
+    const char *async_depth_env = std::getenv("XRSLAM_ASYNC_DEPTH_STAGE_A1");
+    const bool visual_only_stage_a1 =
+        config->has_depth() && !config->has_imu() && async_depth_env &&
+        std::string(async_depth_env) == "1";
+    runtime_assert(visual_only_stage_a1 || !config->has_depth() ||
+                       image->has_depth(),
                    "RGB-D mode requires a depth-bearing Image");
 
     std::unique_ptr<Frame> frame = std::make_unique<Frame>();
     frame->K = config->camera_intrinsic();
     frame->image = image;
-    frame->use_depth = config->has_depth();
+    frame->use_depth = config->has_depth() && !visual_only_stage_a1;
     frame->sqrt_inv_cov = frame->K.block<2, 2>(0, 0);
     frame->sqrt_inv_cov(0, 0) /= ::sqrt(config->keypoint_noise_cov()(0, 0));
     frame->sqrt_inv_cov(1, 1) /= ::sqrt(config->keypoint_noise_cov()(1, 1));
