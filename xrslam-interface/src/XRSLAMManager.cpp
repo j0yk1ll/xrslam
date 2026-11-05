@@ -616,6 +616,7 @@ void XRSLAMManager::ProcessDelayedDepthLocked() {
                 if (geometry_depth_queue_.size() >= max_geometry_queue) {
                     geometry_depth_queue_.pop_front();
                     ++async_depth_stats_.geometry_frames_expired;
+                    ++async_depth_stats_.geometry_queue_evictions;
                 }
                 geometry_depth_queue_.push_back(std::move(sample));
             }
@@ -631,6 +632,7 @@ void XRSLAMManager::ProcessOptimizedDepthLocked() {
     if (!detail_ || !detail_->frontend || !cur_image_) return;
     const double latest_rgb_timestamp = cur_image_->t;
     if (!std::isfinite(latest_rgb_timestamp)) return;
+    async_depth_stats_.latest_rgb_timestamp_s = latest_rgb_timestamp;
     constexpr double max_wait_seconds = 6.0;
     std::deque<DelayedDepth> waiting;
     while (!geometry_depth_queue_.empty()) {
@@ -646,6 +648,7 @@ void XRSLAMManager::ProcessOptimizedDepthLocked() {
                 // expected for many RGB frames and is not a sensor error.
                 ++async_depth_stats_.geometry_frames_unselected;
             } else {
+                ++async_depth_stats_.geometry_missing_snapshot_waits;
                 waiting.push_back(std::move(sample));
             }
             continue;
@@ -654,12 +657,16 @@ void XRSLAMManager::ProcessOptimizedDepthLocked() {
         // later optimized version, so allow it to mature until expiry.
         if (snapshot.points.empty()) {
             if (latest_rgb_timestamp - sample.timestamp >
-                max_wait_seconds)
+                max_wait_seconds) {
                 ++async_depth_stats_.geometry_frames_expired;
-            else
+                ++async_depth_stats_.geometry_empty_snapshot_expirations;
+            } else {
+                ++async_depth_stats_.geometry_empty_snapshot_waits;
                 waiting.push_back(std::move(sample));
+            }
             continue;
         }
+        async_depth_stats_.latest_geometry_matched_timestamp_s = sample.timestamp;
         ++async_depth_stats_.geometry_frames_matched;
         std::vector<double> ratios;
         for (const auto &obs : snapshot.points) {
