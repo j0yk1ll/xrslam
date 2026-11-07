@@ -322,6 +322,12 @@ void Solver::add_track_states(Track *track) {
             relative_sigma =
                 details->config()->depth_monocular_metric_relative_sigma();
         }
+        // Predicted monocular depth shares visual information with the
+        // front-end. The experimental path must never over-weight it.
+        const char *experimental = std::getenv("XRSLAM_EXPERIMENTAL_VIO_DEPTH");
+        if (track->depth_prior_source == DepthSource::MONOCULAR_METRIC &&
+            experimental && std::string(experimental) == "1")
+            relative_sigma = std::max(relative_sigma, 0.5);
         relative_sigma = std::max(relative_sigma, 1.0e-6);
         const double sigma_inv_depth =
             std::max(relative_sigma * std::abs(track->depth_prior_inv_depth),
@@ -552,6 +558,17 @@ bool Solver::solve(bool verbose) {
     solver_options.minimizer_progress_to_stdout = verbose;
     solver_options.update_state_every_iteration = true;
     ceres::Solve(solver_options, details->problem.get(), &solver_summary);
+    const char *experimental = std::getenv("XRSLAM_EXPERIMENTAL_VIO_DEPTH");
+    if (experimental && std::string(experimental) == "1" &&
+        !details->managed_depth_factors.empty()) {
+        std::fprintf(stderr,
+            "[XRSLAMTriModal] event=solver depth_factors=%zu "
+            "imu_factors=%zu total_residual_blocks=%d usable=%d\\n",
+            details->managed_depth_factors.size(),
+            details->managed_piefactors.size(),
+            static_cast<int>(details->problem->NumResidualBlocks()),
+            solver_summary.IsSolutionUsable() ? 1 : 0);
+    }
     return solver_summary.IsSolutionUsable();
 }
 
