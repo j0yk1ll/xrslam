@@ -12,6 +12,9 @@
 #include <xrslam/map/frame.h>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
 #include <unordered_set>
 
 namespace xrslam {
