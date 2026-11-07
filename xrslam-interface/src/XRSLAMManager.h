@@ -80,6 +80,7 @@ class XRSLAMManager {
     std::deque<double> candidate_frame_medians_;
     XRSLAMAsyncDepthStats async_depth_stats_{};
     bool async_depth_enabled_ = false;
+    bool experimental_vio_depth_ = false;
     void ProcessDelayedDepthLocked();
     void ProcessOptimizedDepthLocked();
 };

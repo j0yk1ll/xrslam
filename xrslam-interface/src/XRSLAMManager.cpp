@@ -173,6 +173,10 @@ void XRSLAMManager::Init(std::shared_ptr<Config> config) {
     const char *a2env = std::getenv("XRSLAM_ASYNC_DEPTH_STAGE_A1");
     async_depth_enabled_ = config->has_depth() && !config->has_imu() &&
                            a2env && std::string(a2env) == "1";
+    const char *vio_depth_env = std::getenv("XRSLAM_EXPERIMENTAL_VIO_DEPTH");
+    experimental_vio_depth_ =
+        config->has_depth() && config->has_imu() && vio_depth_env &&
+        std::string(vio_depth_env) == "1";
     async_depth_stats_ = {};
     delayed_depth_queue_.clear();
     geometry_depth_queue_.clear();
@@ -484,6 +488,23 @@ void XRSLAMManager::PushDepth(XRSLAMDepthImage *depth) {
         source = DepthSource::MONOCULAR_RELATIVE;
 
     std::lock_guard<std::mutex> lck(input_mutex_);
+    if (experimental_vio_depth_) {
+        if (!detail_ || !detail_->frontend ||
+            source != DepthSource::MONOCULAR_METRIC ||
+            !std::isfinite(depth->timeStamp) || depth->timeStamp <= 0.0 ||
+            meters.cols != config_->camera_resolution()[0] ||
+            meters.rows != config_->camera_resolution()[1] ||
+            !meters.isContinuous()) {
+            return;
+        }
+        // Transfer owned values only; never expose a mutable Frame/Track
+        // from a ROS callback to the estimator's frontend worker.
+        const float *values = meters.ptr<float>(0);
+        detail_->frontend->queue_experimental_depth(
+            depth->timeStamp, meters.cols, meters.rows,
+            std::vector<float>(values, values + meters.total()));
+        return;
+    }
     if (async_depth_enabled_) {
         ++async_depth_stats_.received;
         if (!std::isfinite(depth->timeStamp) ||

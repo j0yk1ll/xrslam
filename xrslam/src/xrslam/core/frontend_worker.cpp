@@ -4,6 +4,7 @@
 #include <cmath>
 #include <algorithm>
 #include <cstdint>
+#include <string>
 #include <optional>
 #include <xrslam/core/persistent_relocalization_map_io.h>
 #include <filesystem>
@@ -69,6 +70,126 @@ FrontendWorker::FrontendWorker(XRSLAM::Detail *detail,
 }
 
 FrontendWorker::~FrontendWorker() = default;
+
+// Only the frontend worker may touch live track priors. The input queue is
+// bounded and contains no Frame, Track, or Map pointers.
+void FrontendWorker::queue_experimental_depth(
+    double timestamp, int width, int height, std::vector<float> values) {
+    if (!std::isfinite(timestamp) || timestamp <= 0.0 ||
+        width <= 0 || height <= 0 ||
+        values.size() != static_cast<size_t>(width) *
+                         static_cast<size_t>(height))
+        return;
+    std::lock_guard<std::mutex> lock(experimental_depth_mutex_);
+    constexpr size_t capacity = 16;
+    if (experimental_depth_queue_.size() >= capacity)
+        experimental_depth_queue_.pop_front();
+    experimental_depth_queue_.push_back(
+        PendingExperimentalDepth{timestamp, width, height, std::move(values)});
+}
+
+void FrontendWorker::clear_experimental_depth_queue() {
+    std::lock_guard<std::mutex> lock(experimental_depth_mutex_);
+    experimental_depth_queue_.clear();
+}
+
+void FrontendWorker::apply_experimental_depth_priors() {
+    if (!sliding_window_tracker || !sliding_window_tracker->map ||
+        sliding_window_tracker->map->frame_num() == 0)
+        return;
+
+    auto *map = sliding_window_tracker->map.get();
+    const double newest =
+        map->get_frame(map->frame_num() - 1)->image->t;
+    std::deque<PendingExperimentalDepth> pending;
+    {
+        std::lock_guard<std::mutex> lock(experimental_depth_mutex_);
+        pending.swap(experimental_depth_queue_);
+    }
+    std::deque<PendingExperimentalDepth> waiting;
+    for (auto &depth : pending) {
+        if (depth.timestamp > newest + 1.0e-6) {
+            waiting.push_back(std::move(depth));
+            continue;
+        }
+        // Never reuse old predictions across an initialization or loss.
+        if (newest - depth.timestamp > 2.0)
+            continue;
+        Frame *reference = nullptr;
+        for (size_t i = 0; i < map->frame_num(); ++i) {
+            Frame *candidate = map->get_frame(i);
+            if (candidate->image &&
+                std::abs(candidate->image->t - depth.timestamp) < 1.0e-6) {
+                reference = candidate;
+                break;
+            }
+        }
+        if (!reference || reference->K(0, 0) <= 0.0 ||
+            reference->K(1, 1) <= 0.0)
+            continue;
+
+        size_t accepted = 0, candidates = 0;
+        for (size_t i = 0; i < reference->keypoint_num(); ++i) {
+            Track *track = reference->get_track(i);
+            if (!track || track->has_depth_prior ||
+                track->first_frame() != reference ||
+                !track->all_tagged(TT_VALID, TT_TRIANGULATED, TT_STATIC) ||
+                track->tag(TT_FIX_INVD))
+                continue;
+            ++candidates;
+            const auto &bearing = reference->get_keypoint(i);
+            if (!bearing.allFinite() || bearing.z() <= 1.0e-6)
+                continue;
+            const vector<2> pixel = apply_k(bearing, reference->K);
+            if (!pixel.allFinite())
+                continue;
+            const int x = static_cast<int>(std::lround(pixel.x()));
+            const int y = static_cast<int>(std::lround(pixel.y()));
+            if (x < 0 || y < 0 || x >= depth.width || y >= depth.height)
+                continue;
+            const float z = depth.values[
+                static_cast<size_t>(y) * depth.width +
+                static_cast<size_t>(x)];
+            if (!std::isfinite(z) || z <= 0.05f || z >= 50.0f)
+                continue;
+
+            // Track variables are inverse RANGE along unit bearings,
+            // whereas the 32FC1 image reports optical-axis camera Z.
+            const double inverse_range = bearing.z() / z;
+            const double existing = track->landmark.inv_depth;
+            if (!std::isfinite(inverse_range) ||
+                !std::isfinite(existing) || existing <= 0.0 ||
+                inverse_range < existing * 0.5 ||
+                inverse_range > existing * 2.0)
+                continue;
+
+            track->depth_prior_inv_depth = inverse_range;
+            track->depth_prior_source = DepthSource::MONOCULAR_METRIC;
+            // Model depth is correlated with image features: intentionally
+            // conservative confidence, never authoritative metric truth.
+            track->depth_prior_confidence = 0.05;
+            track->has_depth_prior = true;
+            ++accepted;
+            // Bound the influence of correlated monocular predictions.
+            if (accepted >= 32) break;
+        }
+        std::fprintf(stderr,
+            "[XRSLAMTriModal] event=depth_association t=%.9f "
+            "candidates=%zu priors_attached=%zu estimator_authority=0\\n",
+            depth.timestamp, candidates, accepted);
+    }
+    if (!waiting.empty()) {
+        std::lock_guard<std::mutex> lock(experimental_depth_mutex_);
+        // Preserve recent samples and bound memory even under image lag.
+        for (auto &item : waiting) {
+            if (experimental_depth_queue_.size() >= 16)
+                experimental_depth_queue_.pop_front();
+            experimental_depth_queue_.push_back(std::move(item));
+        }
+    }
+}
+
+
 
 VerifiedMapLocalization FrontendWorker::get_verified_map_localization() const {
     std::unique_lock lk(latest_state_mutex);
@@ -361,6 +482,7 @@ void FrontendWorker::work(std::unique_lock<std::mutex> &l) {
             }
             initializer.reset();
             relocalization_auto_loss_gate_.reset();
+            clear_experimental_depth_queue();
             clear_optimized_depth_snapshots();
             capture_optimized_depth_snapshots();
         }
@@ -372,6 +494,9 @@ void FrontendWorker::work(std::unique_lock<std::mutex> &l) {
             sliding_window_tracker->mirror_frame(
                 detail->feature_tracker->map.get(), pending_frame_id);
         }
+        const char *vio_depth_env = std::getenv("XRSLAM_EXPERIMENTAL_VIO_DEPTH");
+        if (vio_depth_env && std::string(vio_depth_env) == "1")
+            apply_experimental_depth_priors();
         bool tracking_ok = sliding_window_tracker->track();
         // Experimental automatic-loss gate. The passive 0121g measurements
         // and criteria are unchanged. A persistent run enters the SAME
@@ -572,6 +697,7 @@ void FrontendWorker::work(std::unique_lock<std::mutex> &l) {
                 persistent_relocalization_map_.candidate_reference_count());
             initializer = std::make_unique<Initializer>(config);
             sliding_window_tracker.reset();
+            clear_experimental_depth_queue();
             clear_optimized_depth_snapshots();
         }
     }

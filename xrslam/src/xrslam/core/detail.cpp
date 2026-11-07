@@ -165,14 +165,18 @@ Pose XRSLAM::Detail::track_camera(std::shared_ptr<Image> image) {
     const bool visual_only_stage_a1 =
         config->has_depth() && !config->has_imu() && async_depth_env &&
         std::string(async_depth_env) == "1";
-    runtime_assert(visual_only_stage_a1 || !config->has_depth() ||
-                       image->has_depth(),
+    const char *vio_depth_env = std::getenv("XRSLAM_EXPERIMENTAL_VIO_DEPTH");
+    const bool async_vio_depth =
+        config->has_depth() && config->has_imu() && vio_depth_env &&
+        std::string(vio_depth_env) == "1";
+    runtime_assert(visual_only_stage_a1 || async_vio_depth ||
+                       !config->has_depth() || image->has_depth(),
                    "RGB-D mode requires a depth-bearing Image");
 
     std::unique_ptr<Frame> frame = std::make_unique<Frame>();
     frame->K = config->camera_intrinsic();
     frame->image = image;
-    frame->use_depth = config->has_depth() && !visual_only_stage_a1;
+    frame->use_depth = config->has_depth() && !visual_only_stage_a1 && !async_vio_depth;
     frame->sqrt_inv_cov = frame->K.block<2, 2>(0, 0);
     frame->sqrt_inv_cov(0, 0) /= ::sqrt(config->keypoint_noise_cov()(0, 0));
     frame->sqrt_inv_cov(1, 1) /= ::sqrt(config->keypoint_noise_cov()(1, 1));
