@@ -59,6 +59,11 @@ class FrontendWorker : public Worker {
                                        OptimizedDepthSnapshot &out) const;
     size_t optimized_depth_snapshot_count() const;
 
+    // Experimental VIO-depth data are copied by value and consumed only
+    // on this worker thread, never through a live map pointer.
+    void queue_experimental_depth(double timestamp, int width, int height,
+                                  std::vector<float> values);
+
     size_t create_virtual_object();
     OutputObject get_virtual_object_pose_by_id(size_t id);
 
@@ -93,6 +98,16 @@ class FrontendWorker : public Worker {
     std::unique_ptr<Localizer> localizer;
 
   private:
+    struct PendingExperimentalDepth {
+        double timestamp = 0.0;
+        int width = 0;
+        int height = 0;
+        std::vector<float> values;
+    };
+    void apply_experimental_depth_priors();
+    void clear_experimental_depth_queue();
+    std::mutex experimental_depth_mutex_;
+    std::deque<PendingExperimentalDepth> experimental_depth_queue_;
     void capture_optimized_depth_snapshots();
     void clear_optimized_depth_snapshots();
     mutable std::mutex optimized_depth_mutex_;
