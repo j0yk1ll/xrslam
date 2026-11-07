@@ -4,6 +4,7 @@
 #include <cmath>
 #include <algorithm>
 #include <cstdint>
+#include <string>
 #include <optional>
 #include <xrslam/core/persistent_relocalization_map_io.h>
 #include <filesystem>
