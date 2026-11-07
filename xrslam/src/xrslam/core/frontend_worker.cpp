@@ -169,6 +169,8 @@ void FrontendWorker::apply_experimental_depth_priors() {
             track->depth_prior_confidence = 0.05;
             track->has_depth_prior = true;
             ++accepted;
+            // Bound the influence of correlated monocular predictions.
+            if (accepted >= 32) break;
         }
         std::fprintf(stderr,
             "[XRSLAMTriModal] event=depth_association t=%.9f "
@@ -694,6 +696,7 @@ void FrontendWorker::work(std::unique_lock<std::mutex> &l) {
                 persistent_relocalization_map_.candidate_reference_count());
             initializer = std::make_unique<Initializer>(config);
             sliding_window_tracker.reset();
+            clear_experimental_depth_queue();
             clear_optimized_depth_snapshots();
         }
     }
