@@ -28,6 +28,13 @@ namespace xrslam {
 
 namespace {
 
+bool visual_constraint_diag_enabled() {
+    static const bool enabled = [] {
+        const char *value = std::getenv("XRSLAM_VISUAL_CONSTRAINT_DIAG");
+        return value && value[0] == '1' && value[1] == '\0';
+    }();
+    return enabled;
+}
 
 size_t place_retrieval_top_k() {
     constexpr size_t default_top_k = 20;
@@ -3768,9 +3775,12 @@ void SlidingWindowTracker::localize_newframe() {
     auto solver = Solver::create();
     solver->add_frame_states(frame_j);
 
+    size_t diag_imu = 0;
+    size_t diag_visual = 0;
     if (config->has_imu()) {
         solver->put_factor(Solver::create_preintegration_prior_factor(
             frame_i, frame_j, frame_j->preintegration));
+        ++diag_imu;
     }
 
     for (size_t k = 0; k < frame_j->keypoint_num(); ++k) {
@@ -3778,10 +3788,18 @@ void SlidingWindowTracker::localize_newframe() {
             if (track->all_tagged(TT_VALID, TT_TRIANGULATED, TT_STATIC)) {
                 solver->put_factor(
                     Solver::create_reprojection_prior_factor(frame_j, track));
+                ++diag_visual;
             }
         }
     }
 
+    if (visual_constraint_diag_enabled()) {
+        std::fprintf(stderr,
+                     "[XRSLAM][visual_constraint_diag] stage=localize "
+                     "t=%.9f visual=%zu imu=%zu keypoints=%zu\n",
+                     frame_j->image->t, diag_visual, diag_imu,
+                     frame_j->keypoint_num());
+    }
     solver->solve();
 }
 
@@ -3891,6 +3909,9 @@ void SlidingWindowTracker::refine_window() {
     Frame *keyframe_i = map->get_frame(map->frame_num() - 2);
     Frame *keyframe_j = map->get_frame(map->frame_num() - 1);
 
+    size_t diag_visual = 0;
+    size_t diag_imu = 0;
+    size_t diag_tracks = 0;
     auto solver = Solver::create();
     if (!map->marginalization_factor) {
         map->marginalization_factor =
@@ -3917,6 +3938,7 @@ void SlidingWindowTracker::refine_window() {
             if (!track->first_frame()->tag(FT_KEYFRAME))
                 continue;
             solver->add_track_states(track);
+            ++diag_tracks;
         }
     }
 
@@ -3935,6 +3957,7 @@ void SlidingWindowTracker::refine_window() {
             if (frame == track->first_frame())
                 continue;
             solver->add_factor(frame->reprojection_error_factors[j].get());
+            ++diag_visual;
         }
     }
 
@@ -3961,12 +3984,26 @@ void SlidingWindowTracker::refine_window() {
                     true, true)) {
                 solver->put_factor(Solver::create_preintegration_error_factor(
                     frame_i, frame_j, frame_j->keyframe_preintegration));
+                ++diag_imu;
             }
         }
     }
 
+    if (visual_constraint_diag_enabled()) {
+        std::fprintf(stderr,
+                     "[XRSLAM][visual_constraint_diag] stage=window "
+                     "t=%.9f visual=%zu imu=%zu landmarks=%zu frames=%zu\n",
+                     keyframe_j->image->t, diag_visual, diag_imu,
+                     diag_tracks, map->frame_num());
+    }
     solver->solve();
 
+    size_t diag_depth_low = 0;
+    size_t diag_depth_high = 0;
+    size_t diag_reprojection = 0;
+    size_t diag_accepted = 0;
+    size_t diag_untriangulated = 0;
+    size_t diag_new_trash = 0;
     for (size_t k = 0; k < map->track_num(); ++k) {
         Track *track = map->get_track(k);
         if (track->tag(TT_TRIANGULATED)) {
@@ -3980,6 +4017,8 @@ void SlidingWindowTracker::refine_window() {
                 PoseState pose = frame->get_pose(frame->camera);
                 vector<3> y = pose.q.conjugate() * (x - pose.p);
                 if (y.z() <= 1.0e-3 || y.z() > 50) { // todo
+                    if (y.z() <= 1.0e-3) ++diag_depth_low;
+                    else ++diag_depth_high;
                     is_valid = false;
                     break;
                 }
@@ -3988,17 +4027,32 @@ void SlidingWindowTracker::refine_window() {
                            .norm();
                 rpe_count += 1.0;
             }
-            is_valid = is_valid && (rpe / std::max(rpe_count, 1.0) < 3.0);
+            const bool rpe_valid = rpe / std::max(rpe_count, 1.0) < 3.0;
+            if (is_valid && !rpe_valid) ++diag_reprojection;
+            is_valid = is_valid && rpe_valid;
+            if (is_valid) ++diag_accepted;
             track->tag(TT_VALID) = is_valid;
         } else {
+            ++diag_untriangulated;
             track->landmark.inv_depth = -1.0;
         }
     }
 
     for (size_t k = 0; k < map->track_num(); ++k) {
         Track *track = map->get_track(k);
-        if (!track->tag(TT_VALID))
+        if (!track->tag(TT_VALID)) {
+            if (!track->tag(TT_TRASH)) ++diag_new_trash;
             track->tag(TT_TRASH) = true;
+        }
+    }
+    if (visual_constraint_diag_enabled()) {
+        std::fprintf(stderr,
+                     "[XRSLAM][visual_constraint_diag] stage=reject "
+                     "t=%.9f accepted=%zu depth_low=%zu depth_high=%zu "
+                     "rpe=%zu untriangulated=%zu new_trash=%zu tracks=%zu\n",
+                     keyframe_j->image->t, diag_accepted, diag_depth_low,
+                     diag_depth_high, diag_reprojection, diag_untriangulated,
+                     diag_new_trash, map->track_num());
     }
 }
 
