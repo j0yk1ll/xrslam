@@ -443,14 +443,16 @@ bool Initializer::init_imu() {
         // Failed initialization may retry for many frames. Bound log volume.
         static unsigned failure_logs = 0;
         if (!accepted && failure_logs++ >= 20) return;
-        const vector<3> v0 = velocities.empty() ? vector<3>::Zero()
-                                                 : velocities.front();
-        const vector<3> vn = velocities.empty() ? vector<3>::Zero()
-                                                 : velocities.back();
+        vector<3> v0 = vector<3>::Zero();
+        vector<3> vn = vector<3>::Zero();
+        if (!velocities.empty()) {
+            v0 = velocities.front();
+            vn = velocities.back();
+        }
         std::fprintf(stderr,
             "XRSLAM_INIT_DIAG stage=%s accepted=%d scale=%.9g "
             "gravity=%.9g,%.9g,%.9g bg=%.9g,%.9g,%.9g "
-            "v_first=%.9g,%.9g,%.9g v_last=%.9g,%.9g,%.9g frames=%zu\\n",
+            "v_first=%.9g,%.9g,%.9g v_last=%.9g,%.9g,%.9g frames=%zu\n",
             stage, accepted ? 1 : 0, scale,
             gravity.x(), gravity.y(), gravity.z(),
             bg.x(), bg.y(), bg.z(),
