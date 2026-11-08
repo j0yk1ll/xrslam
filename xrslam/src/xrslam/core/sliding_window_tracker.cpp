@@ -4070,7 +4070,11 @@ void SlidingWindowTracker::refine_subwindow() {
     Frame *frame = map->get_frame(map->frame_num() - 1);
     if (frame->subframes.empty())
         return;
-    if (frame->subframes[0]->tag(FT_NO_TRANSLATION)) {
+    size_t diag_imu = 0;
+    size_t diag_visual = 0;
+    size_t diag_rotation = 0;
+    const bool diag_no_translation = frame->subframes[0]->tag(FT_NO_TRANSLATION);
+    if (diag_no_translation) {
         if (frame->subframes.size() >= 9) {
             for (size_t i = frame->subframes.size() / 3; i > 0; --i) {
                 Frame *tgt_frame = frame->subframes[i * 3 - 1].get();
@@ -4105,6 +4109,7 @@ void SlidingWindowTracker::refine_subwindow() {
                     prev_frame->motion.ba, true, true);
                 solver->put_factor(Solver::create_preintegration_error_factor(
                     prev_frame, subframe, subframe->preintegration));
+                ++diag_imu;
             }
         }
 
@@ -4113,18 +4118,30 @@ void SlidingWindowTracker::refine_subwindow() {
             if (Track *track = last_subframe->get_track(k)) {
                 if (track->tag(TT_VALID)) {
                     if (track->tag(TT_TRIANGULATED)) {
-                        if (track->tag(TT_STATIC))
+                        if (track->tag(TT_STATIC)) {
                             solver->put_factor(
                                 Solver::create_reprojection_prior_factor(
                                     last_subframe, track));
+                            ++diag_visual;
+                        }
                     } else {
                         solver->put_factor(Solver::create_rotation_prior_factor(
                             last_subframe, track));
+                        ++diag_rotation;
                     }
                 }
             }
         }
 
+        if (visual_constraint_diag_enabled()) {
+            std::fprintf(stderr,
+                         "[XRSLAM][visual_constraint_diag] stage=subwindow "
+                         "t=%.9f no_translation=%d visual=%zu rotation=%zu "
+                         "imu=%zu subframes=%zu\n",
+                         frame->subframes.back()->image->t,
+                         static_cast<int>(diag_no_translation), diag_visual,
+                         diag_rotation, diag_imu, frame->subframes.size());
+        }
         solver->solve();
         frame->tag(FT_FIX_POSE) = false;
         frame->tag(FT_FIX_MOTION) = false;
@@ -4144,6 +4161,7 @@ void SlidingWindowTracker::refine_subwindow() {
                     prev_frame->motion.ba, true, true);
                 solver->put_factor(Solver::create_preintegration_error_factor(
                     prev_frame, subframe, subframe->preintegration));
+                ++diag_imu;
             }
             for (size_t k = 0; k < subframe->keypoint_num(); ++k) {
                 if (Track *track = subframe->get_track(k)) {
@@ -4153,13 +4171,24 @@ void SlidingWindowTracker::refine_subwindow() {
                             solver->put_factor(
                                 Solver::create_reprojection_prior_factor(
                                     subframe, track));
+                            ++diag_visual;
                         } else if (track->first_frame()->id() > frame->id()) {
                             solver->add_factor(
                                 subframe->reprojection_error_factors[k].get());
+                            ++diag_visual;
                         }
                     }
                 }
             }
+        }
+        if (visual_constraint_diag_enabled()) {
+            std::fprintf(stderr,
+                         "[XRSLAM][visual_constraint_diag] stage=subwindow "
+                         "t=%.9f no_translation=%d visual=%zu rotation=%zu "
+                         "imu=%zu subframes=%zu\n",
+                         frame->subframes.back()->image->t,
+                         static_cast<int>(diag_no_translation), diag_visual,
+                         diag_rotation, diag_imu, frame->subframes.size());
         }
         solver->solve();
         frame->tag(FT_FIX_POSE) = false;
