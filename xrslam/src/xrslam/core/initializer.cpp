@@ -1,3 +1,4 @@
+#include <cstdio>
 #include <cstdlib>
 #include <string>
 
@@ -433,18 +434,50 @@ bool Initializer::init_imu() {
         return true;
     }
 
+    // Offline commissioning observability only. Never modify inferred
+    // gravity, scale, velocity, thresholds, or estimator control flow.
+    const char *diag_env = std::getenv("XRSLAM_INIT_DIAG");
+    const bool diagnose = diag_env && std::string(diag_env) == "1";
+    auto log_init = [&](const char *stage, bool accepted) {
+        if (!diagnose) return;
+        // Failed initialization may retry for many frames. Bound log volume.
+        static unsigned failure_logs = 0;
+        if (!accepted && failure_logs++ >= 20) return;
+        const vector<3> v0 = velocities.empty() ? vector<3>::Zero()
+                                                 : velocities.front();
+        const vector<3> vn = velocities.empty() ? vector<3>::Zero()
+                                                 : velocities.back();
+        std::fprintf(stderr,
+            "XRSLAM_INIT_DIAG stage=%s accepted=%d scale=%.9g "
+            "gravity=%.9g,%.9g,%.9g bg=%.9g,%.9g,%.9g "
+            "v_first=%.9g,%.9g,%.9g v_last=%.9g,%.9g,%.9g frames=%zu\\n",
+            stage, accepted ? 1 : 0, scale,
+            gravity.x(), gravity.y(), gravity.z(),
+            bg.x(), bg.y(), bg.z(),
+            v0.x(), v0.y(), v0.z(),
+            vn.x(), vn.y(), vn.z(), map->frame_num());
+    };
+
     reset_states();
     solve_gyro_bias();
     solve_gravity_scale_velocity();
-    if (scale < 0.001 || scale > 1.0)
+    if (scale < 0.001 || scale > 1.0) {
+        log_init("linear_scale_rejected", false);
         return false;
+    }
     if (!config->initializer_refine_imu()) {
-        return apply_init();
+        const bool accepted = apply_init();
+        log_init("unrefined_apply", accepted);
+        return accepted;
     }
     refine_scale_velocity_via_gravity();
-    if (scale < 0.001 || scale > 1.0)
+    if (scale < 0.001 || scale > 1.0) {
+        log_init("refined_scale_rejected", false);
         return false;
-    return apply_init();
+    }
+    const bool accepted = apply_init();
+    log_init("refined_apply", accepted);
+    return accepted;
 }
 
 void Initializer::solve_gyro_bias() {
