@@ -1,4 +1,5 @@
 #include "XRSLAMManager.h"
+#include "body_pose_output.h"
 
 #include <xrslam/core/frontend_worker.h>
 #include <xrslam/core/feature_tracker.h>
@@ -800,16 +801,10 @@ void XRSLAMManager::ProcessOptimizedDepthLocked() {
 void XRSLAMManager::GetResultBodyPose(XRSLAMPose *pose) const {
     std::tuple<double, Pose> latest_state = detail_->get_latest_pose();
     pose->timestamp = std::get<0>(latest_state);
-    Pose latest_pose = std::get<1>(latest_state);
-    Pose body_pose;
-    body_pose.q = latest_pose.q * config_->imu_to_body_rotation();
-    body_pose.p = latest_pose.p + latest_pose.q * config_->imu_to_body_translation();
-    for (int i = 0; i < 3; i++)
-        pose->translation[i] = body_pose.p(i);
-    pose->quaternion[0] = body_pose.q.x();
-    pose->quaternion[1] = body_pose.q.y();
-    pose->quaternion[2] = body_pose.q.z();
-    pose->quaternion[3] = body_pose.q.w();
+    // Detail::predict_pose already applies output.q_bo/p_bo. In Leroy's
+    // identity-output configuration, this is T_world_body. Applying q_bi/p_bi
+    // again here would incorrectly return T_world_imu as BODY_POSE.
+    CopyBodyPoseToResult(std::get<1>(latest_state), pose->timestamp, pose);
 }
 
 bool XRSLAMManager::GetVerifiedMapAlignment(
