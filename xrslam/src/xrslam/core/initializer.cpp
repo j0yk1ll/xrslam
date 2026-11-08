@@ -1,3 +1,4 @@
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -462,6 +463,40 @@ bool Initializer::init_imu() {
 
     reset_states();
     solve_gyro_bias();
+    // Commissioning experiment only: use a separately estimated, fixed
+    // gyroscope bias at initialization to test whether bias initialization
+    // drives attitude/gravity leakage. Never enabled in normal operation.
+    const char *offline_bg = std::getenv("XRSLAM_OFFLINE_INIT_BG_OVERRIDE");
+    if (offline_bg && offline_bg[0]) {
+        const char *domain = std::getenv("ROS_DOMAIN_ID");
+        const char *diag = std::getenv("XRSLAM_INIT_DIAG");
+        if (!domain || std::string(domain) != "191" ||
+            !diag || std::string(diag) != "1") {
+            std::fprintf(stderr,
+                "XRSLAM_OFFLINE_INIT_BG_OVERRIDE refused: "
+                "requires ROS_DOMAIN_ID=191 and XRSLAM_INIT_DIAG=1\n");
+        } else {
+            double x = 0, y = 0, z = 0;
+            char trailing = 0;
+            const int parsed = std::sscanf(
+                offline_bg, " %lf , %lf , %lf %c", &x, &y, &z, &trailing);
+            if (parsed == 3 &&
+                std::isfinite(x) && std::isfinite(y) && std::isfinite(z) &&
+                std::abs(x) <= 0.05 && std::abs(y) <= 0.05 &&
+                std::abs(z) <= 0.05) {
+                std::fprintf(stderr,
+                    "XRSLAM_OFFLINE_INIT_BG_OVERRIDE "
+                    "original=%.9g,%.9g,%.9g replacement=%.9g,%.9g,%.9g\n",
+                    bg.x(), bg.y(), bg.z(), x, y, z);
+                bg = vector<3>{x, y, z};
+            } else {
+                std::fprintf(stderr,
+                    "XRSLAM_OFFLINE_INIT_BG_OVERRIDE refused: "
+                    "expected three finite comma-separated rad/s values "
+                    "within +/-0.05\n");
+            }
+        }
+    }
     solve_gravity_scale_velocity();
     if (scale < 0.001 || scale > 1.0) {
         log_init("linear_scale_rejected", false);
