@@ -1,10 +1,23 @@
 #include <cmath>
+#include <string>
 
 #include <Eigen/Geometry>
 #include <gtest/gtest.h>
 #include "body_pose_output.h"
 
 namespace {
+
+// Real public C ABI smoke without requiring tracking, images or hardware.
+// This verifies that the regression binary loads and dispatches into the
+// native XRSLAM shared library, not the body pose's live tracking semantics.
+TEST(BodyPoseOutput, PublicCAbiVersionDispatch) {
+    XRSLAMStringOutput output{};
+    XRSLAMGetResult(XRSLAM_RESULT_VERSION, &output);
+    ASSERT_NE(output.data, nullptr);
+    EXPECT_GT(output.str_length, 0);
+    EXPECT_EQ(std::string(output.data), "0.1.0");
+    delete[] output.data;
+}
 
 TEST(BodyPoseOutput, PreservesNonidentityBodyPoseAndTimestamp) {
     xrslam::Pose body;
