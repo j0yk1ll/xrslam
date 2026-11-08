@@ -3777,6 +3777,11 @@ void SlidingWindowTracker::localize_newframe() {
 
     size_t diag_imu = 0;
     size_t diag_visual = 0;
+    size_t diag_track_slots = 0;
+    size_t diag_valid_slots = 0;
+    size_t diag_triangulated_slots = 0;
+    size_t diag_static_slots = 0;
+    size_t diag_trash_slots = 0;
     if (config->has_imu()) {
         solver->put_factor(Solver::create_preintegration_prior_factor(
             frame_i, frame_j, frame_j->preintegration));
@@ -3785,6 +3790,13 @@ void SlidingWindowTracker::localize_newframe() {
 
     for (size_t k = 0; k < frame_j->keypoint_num(); ++k) {
         if (Track *track = frame_j->get_track(k)) {
+            if (visual_constraint_diag_enabled()) {
+                ++diag_track_slots;
+                if (track->tag(TT_VALID)) ++diag_valid_slots;
+                if (track->tag(TT_TRIANGULATED)) ++diag_triangulated_slots;
+                if (track->tag(TT_STATIC)) ++diag_static_slots;
+                if (track->tag(TT_TRASH)) ++diag_trash_slots;
+            }
             if (track->all_tagged(TT_VALID, TT_TRIANGULATED, TT_STATIC)) {
                 solver->put_factor(
                     Solver::create_reprojection_prior_factor(frame_j, track));
@@ -3796,9 +3808,13 @@ void SlidingWindowTracker::localize_newframe() {
     if (visual_constraint_diag_enabled()) {
         std::fprintf(stderr,
                      "[XRSLAM][visual_constraint_diag] stage=localize "
-                     "t=%.9f visual=%zu imu=%zu keypoints=%zu\n",
+                     "t=%.9f visual=%zu imu=%zu keypoints=%zu "
+                     "track_slots=%zu valid_slots=%zu triangulated_slots=%zu "
+                     "static_slots=%zu trash_slots=%zu\n",
                      frame_j->image->t, diag_visual, diag_imu,
-                     frame_j->keypoint_num());
+                     frame_j->keypoint_num(), diag_track_slots,
+                     diag_valid_slots, diag_triangulated_slots,
+                     diag_static_slots, diag_trash_slots);
     }
     solver->solve();
 }
