@@ -65,9 +65,11 @@ void FeatureTracker::work(std::unique_lock<std::mutex> &l) {
                     const bool feedback_diag =
                         feedback_env && std::string(feedback_env) == "1";
                     const vector<3> anchor_before_p = latest_optimized_frame->pose.p;
+                    const auto anchor_before_q = latest_optimized_frame->pose.q;
                     const vector<3> anchor_before_v = latest_optimized_frame->motion.v;
                     const Frame *prior_last_frame = map->get_frame(map->frame_num() - 1);
                     const vector<3> last_before_p = prior_last_frame->pose.p;
+                    const auto last_before_q = prior_last_frame->pose.q;
                     const vector<3> last_before_v = prior_last_frame->motion.v;
                     const double anchor_timestamp = latest_optimized_frame->image->t;
                     const double last_timestamp = prior_last_frame->image->t;
@@ -94,15 +96,22 @@ void FeatureTracker::work(std::unique_lock<std::mutex> &l) {
                             (latest_optimized_pose.p - anchor_before_p).norm();
                         const double last_dp =
                             (last_after->pose.p - last_before_p).norm();
+                        const double anchor_dq =
+                            anchor_before_q.angularDistance(latest_optimized_pose.q);
+                        const double last_dq =
+                            last_before_q.angularDistance(last_after->pose.q);
                         // Log all substantive corrections; sample quiet updates
                         // to expose the baseline without flooding the replay.
                         static size_t feedback_calls = 0;
                         if (anchor_dp > 0.05 || last_dp > 0.05 ||
+                            anchor_dq > 0.0017453292519943296 ||
+                            last_dq > 0.0017453292519943296 ||
                             (++feedback_calls % 32) == 0) {
                             std::fprintf(stderr,
                                 "XRSLAM_FEEDBACK_DIAG frame=%zu anchor_t=%.9f "
                                 "optimized_t=%.9f last_t=%.9f "
                                 "anchor_dp=%.8g last_dp=%.8g "
+                                "anchor_dq_rad=%.8g last_dq_rad=%.8g "
                                 "anchor_before_p=%.8g,%.8g,%.8g "
                                 "anchor_after_p=%.8g,%.8g,%.8g "
                                 "last_before_p=%.8g,%.8g,%.8g "
@@ -114,6 +123,7 @@ void FeatureTracker::work(std::unique_lock<std::mutex> &l) {
                                 latest_optimized_frame_id,
                                 anchor_timestamp, latest_optimized_time,
                                 last_timestamp, anchor_dp, last_dp,
+                                anchor_dq, last_dq,
                                 anchor_before_p.x(), anchor_before_p.y(), anchor_before_p.z(),
                                 latest_optimized_pose.p.x(), latest_optimized_pose.p.y(), latest_optimized_pose.p.z(),
                                 last_before_p.x(), last_before_p.y(), last_before_p.z(),
