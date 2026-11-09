@@ -1,3 +1,5 @@
+#include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <string>
 
@@ -433,18 +435,86 @@ bool Initializer::init_imu() {
         return true;
     }
 
+    // Offline commissioning observability only. Never modify inferred
+    // gravity, scale, velocity, thresholds, or estimator control flow.
+    const char *diag_env = std::getenv("XRSLAM_INIT_DIAG");
+    const bool diagnose = diag_env && std::string(diag_env) == "1";
+    auto log_init = [&](const char *stage, bool accepted) {
+        if (!diagnose) return;
+        // Failed initialization may retry for many frames. Bound log volume.
+        static unsigned failure_logs = 0;
+        if (!accepted && failure_logs++ >= 20) return;
+        vector<3> v0 = vector<3>::Zero();
+        vector<3> vn = vector<3>::Zero();
+        if (!velocities.empty()) {
+            v0 = velocities.front();
+            vn = velocities.back();
+        }
+        std::fprintf(stderr,
+            "XRSLAM_INIT_DIAG stage=%s accepted=%d scale=%.9g "
+            "gravity=%.9g,%.9g,%.9g bg=%.9g,%.9g,%.9g "
+            "v_first=%.9g,%.9g,%.9g v_last=%.9g,%.9g,%.9g frames=%zu\n",
+            stage, accepted ? 1 : 0, scale,
+            gravity.x(), gravity.y(), gravity.z(),
+            bg.x(), bg.y(), bg.z(),
+            v0.x(), v0.y(), v0.z(),
+            vn.x(), vn.y(), vn.z(), map->frame_num());
+    };
+
     reset_states();
     solve_gyro_bias();
+    // Commissioning experiment only: use a separately estimated, fixed
+    // gyroscope bias at initialization to test whether bias initialization
+    // drives attitude/gravity leakage. Never enabled in normal operation.
+    const char *offline_bg = std::getenv("XRSLAM_OFFLINE_INIT_BG_OVERRIDE");
+    if (offline_bg && offline_bg[0]) {
+        const char *domain = std::getenv("ROS_DOMAIN_ID");
+        const char *diag = std::getenv("XRSLAM_INIT_DIAG");
+        if (!domain || std::string(domain) != "191" ||
+            !diag || std::string(diag) != "1") {
+            std::fprintf(stderr,
+                "XRSLAM_OFFLINE_INIT_BG_OVERRIDE refused: "
+                "requires ROS_DOMAIN_ID=191 and XRSLAM_INIT_DIAG=1\n");
+        } else {
+            double x = 0, y = 0, z = 0;
+            char trailing = 0;
+            const int parsed = std::sscanf(
+                offline_bg, " %lf , %lf , %lf %c", &x, &y, &z, &trailing);
+            if (parsed == 3 &&
+                std::isfinite(x) && std::isfinite(y) && std::isfinite(z) &&
+                std::abs(x) <= 0.05 && std::abs(y) <= 0.05 &&
+                std::abs(z) <= 0.05) {
+                std::fprintf(stderr,
+                    "XRSLAM_OFFLINE_INIT_BG_OVERRIDE "
+                    "original=%.9g,%.9g,%.9g replacement=%.9g,%.9g,%.9g\n",
+                    bg.x(), bg.y(), bg.z(), x, y, z);
+                bg = vector<3>{x, y, z};
+            } else {
+                std::fprintf(stderr,
+                    "XRSLAM_OFFLINE_INIT_BG_OVERRIDE refused: "
+                    "expected three finite comma-separated rad/s values "
+                    "within +/-0.05\n");
+            }
+        }
+    }
     solve_gravity_scale_velocity();
-    if (scale < 0.001 || scale > 1.0)
+    if (scale < 0.001 || scale > 1.0) {
+        log_init("linear_scale_rejected", false);
         return false;
+    }
     if (!config->initializer_refine_imu()) {
-        return apply_init();
+        const bool accepted = apply_init();
+        log_init("unrefined_apply", accepted);
+        return accepted;
     }
     refine_scale_velocity_via_gravity();
-    if (scale < 0.001 || scale > 1.0)
+    if (scale < 0.001 || scale > 1.0) {
+        log_init("refined_scale_rejected", false);
         return false;
-    return apply_init();
+    }
+    const bool accepted = apply_init();
+    log_init("refined_apply", accepted);
+    return accepted;
 }
 
 void Initializer::solve_gyro_bias() {

@@ -10,6 +10,10 @@
 #include <xrslam/map/map.h>
 #include <xrslam/map/track.h>
 #include <xrslam/utility/unique_timer.h>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+
 namespace xrslam {
 
 FeatureTracker::FeatureTracker(XRSLAM::Detail *detail,
@@ -55,6 +59,20 @@ void FeatureTracker::work(std::unique_lock<std::mutex> &l) {
                 if (latest_optimized_frame_index != nil()) {
                     Frame *latest_optimized_frame =
                         map->get_frame(latest_optimized_frame_index);
+                    // Trace the feedback correction and subsequent forward
+                    // propagation without altering either. Opt-in, offline only.
+                    const char *feedback_env = std::getenv("XRSLAM_FEEDBACK_DIAG");
+                    const bool feedback_diag =
+                        feedback_env && std::string(feedback_env) == "1";
+                    const vector<3> anchor_before_p = latest_optimized_frame->pose.p;
+                    const auto anchor_before_q = latest_optimized_frame->pose.q;
+                    const vector<3> anchor_before_v = latest_optimized_frame->motion.v;
+                    const Frame *prior_last_frame = map->get_frame(map->frame_num() - 1);
+                    const vector<3> last_before_p = prior_last_frame->pose.p;
+                    const auto last_before_q = prior_last_frame->pose.q;
+                    const vector<3> last_before_v = prior_last_frame->motion.v;
+                    const double anchor_timestamp = latest_optimized_frame->image->t;
+                    const double last_timestamp = prior_last_frame->image->t;
                     latest_optimized_frame->pose = latest_optimized_pose;
                     latest_optimized_frame->motion = latest_optimized_motion;
                     for (size_t j = latest_optimized_frame_index + 1;
@@ -70,6 +88,50 @@ void FeatureTracker::work(std::unique_lock<std::mutex> &l) {
                             frame_j->pose = frame_i->pose;
                             frame_j->motion = frame_i->motion;
                             frame_j->tag(FT_FIX_MOTION) = true;
+                        }
+                    }
+                    if (feedback_diag) {
+                        const Frame *last_after = map->get_frame(map->frame_num() - 1);
+                        const double anchor_dp =
+                            (latest_optimized_pose.p - anchor_before_p).norm();
+                        const double last_dp =
+                            (last_after->pose.p - last_before_p).norm();
+                        const double anchor_dq =
+                            anchor_before_q.angularDistance(latest_optimized_pose.q);
+                        const double last_dq =
+                            last_before_q.angularDistance(last_after->pose.q);
+                        // Log all substantive corrections; sample quiet updates
+                        // to expose the baseline without flooding the replay.
+                        static size_t feedback_calls = 0;
+                        if (anchor_dp > 0.05 || last_dp > 0.05 ||
+                            anchor_dq > 0.0017453292519943296 ||
+                            last_dq > 0.0017453292519943296 ||
+                            (++feedback_calls % 32) == 0) {
+                            std::fprintf(stderr,
+                                "XRSLAM_FEEDBACK_DIAG frame=%zu anchor_t=%.9f "
+                                "optimized_t=%.9f last_t=%.9f "
+                                "anchor_dp=%.8g last_dp=%.8g "
+                                "anchor_dq_rad=%.8g last_dq_rad=%.8g "
+                                "anchor_before_p=%.8g,%.8g,%.8g "
+                                "anchor_after_p=%.8g,%.8g,%.8g "
+                                "last_before_p=%.8g,%.8g,%.8g "
+                                "last_after_p=%.8g,%.8g,%.8g "
+                                "anchor_before_v=%.8g,%.8g,%.8g "
+                                "anchor_after_v=%.8g,%.8g,%.8g "
+                                "last_before_v=%.8g,%.8g,%.8g "
+                                "last_after_v=%.8g,%.8g,%.8g\n",
+                                latest_optimized_frame_id,
+                                anchor_timestamp, latest_optimized_time,
+                                last_timestamp, anchor_dp, last_dp,
+                                anchor_dq, last_dq,
+                                anchor_before_p.x(), anchor_before_p.y(), anchor_before_p.z(),
+                                latest_optimized_pose.p.x(), latest_optimized_pose.p.y(), latest_optimized_pose.p.z(),
+                                last_before_p.x(), last_before_p.y(), last_before_p.z(),
+                                last_after->pose.p.x(), last_after->pose.p.y(), last_after->pose.p.z(),
+                                anchor_before_v.x(), anchor_before_v.y(), anchor_before_v.z(),
+                                latest_optimized_motion.v.x(), latest_optimized_motion.v.y(), latest_optimized_motion.v.z(),
+                                last_before_v.x(), last_before_v.y(), last_before_v.z(),
+                                last_after->motion.v.x(), last_after->motion.v.y(), last_after->motion.v.z());
                         }
                     }
                 } else {

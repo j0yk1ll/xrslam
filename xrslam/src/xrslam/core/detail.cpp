@@ -12,7 +12,10 @@
 #include <xrslam/map/map.h>
 #include <xrslam/place_recognition.h>
 
+#include <atomic>
+#include <cstdio>
 #include <cstdlib>
+#include <string>
 #include <limits>
 #include <stdexcept>
 
@@ -241,7 +244,20 @@ Pose XRSLAM::Detail::predict_pose(const double &t) {
         inspect_debug(input_output_lag, lag) {
             lag = std::min(t - state_time, 5.0);
         }
-        // std::cout << "delay: " << t - state_time << std::endl;
+        // Read-only, opt-in estimator-state sampling for offline replay.
+        // Capture the frontend state before IMU propagation separately from
+        // the pose ultimately emitted by this function.
+        const char *state_diag_env = std::getenv("XRSLAM_STATE_DIAG");
+        static std::atomic<unsigned long> state_diag_calls{0};
+        const bool state_diag =
+            state_diag_env && std::string(state_diag_env) == "1" &&
+            (state_diag_calls.fetch_add(1, std::memory_order_relaxed) % 16 == 0);
+        const double frontend_time = state_time;
+        const vector<3> frontend_position = state_pose.p;
+        const vector<3> frontend_velocity = state_motion.v;
+        const vector<3> frontend_bg = state_motion.bg;
+        const vector<3> frontend_ba = state_motion.ba;
+        size_t propagated_imu_count = 0;
 
         if (config->has_imu()) {
             while (!frontal_imus.empty() &&
@@ -252,8 +268,24 @@ Pose XRSLAM::Detail::predict_pose(const double &t) {
                 if (imu.t <= t) {
                     propagate_state(state_time, state_pose, state_motion, imu.t,
                                     imu.w, imu.a);
+                    ++propagated_imu_count;
                 }
             }
+        }
+        if (state_diag) {
+            std::fprintf(stderr,
+                "XRSLAM_STATE_DIAG t=%.9f frontend_t=%.9f propagated_t=%.9f "
+                "imu_count=%zu p_frontend=%.8g,%.8g,%.8g "
+                "p_predicted=%.8g,%.8g,%.8g "
+                "v_frontend=%.8g,%.8g,%.8g v_predicted=%.8g,%.8g,%.8g "
+                "bg=%.8g,%.8g,%.8g ba=%.8g,%.8g,%.8g\n",
+                t, frontend_time, state_time, propagated_imu_count,
+                frontend_position.x(), frontend_position.y(), frontend_position.z(),
+                state_pose.p.x(), state_pose.p.y(), state_pose.p.z(),
+                frontend_velocity.x(), frontend_velocity.y(), frontend_velocity.z(),
+                state_motion.v.x(), state_motion.v.y(), state_motion.v.z(),
+                frontend_bg.x(), frontend_bg.y(), frontend_bg.z(),
+                frontend_ba.x(), frontend_ba.y(), frontend_ba.z());
         }
         output_pose.q = state_pose.q * config->output_to_body_rotation();
         output_pose.p =

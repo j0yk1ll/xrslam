@@ -23,3 +23,11 @@ target_link_libraries(test_se3_cost_function xrslam)
 
 xr_add_test(test_feature_track SRCS src/test_main.cpp src/test_feature_track.cpp)
 target_link_libraries(test_feature_track xrslam-extra-opencv-image xrslam-extra-yaml-config)
+
+# Pure API serialization regression; does not start XRSLAM or read sensors.
+xr_add_test(test_body_pose_output SRCS src/test_main.cpp src/test_body_pose_output.cpp)
+target_include_directories(test_body_pose_output PRIVATE
+    ${CMAKE_SOURCE_DIR}/xrslam-interface/src
+    ${CMAKE_SOURCE_DIR}/xrslam-interface/include
+    ${CMAKE_SOURCE_DIR}/xrslam/include)
+target_link_libraries(test_body_pose_output xrslam)
