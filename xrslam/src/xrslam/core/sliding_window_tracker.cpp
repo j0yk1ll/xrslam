@@ -4053,7 +4053,7 @@ void SlidingWindowTracker::refine_window() {
     size_t diag_newtri_pre_depth_high = 0;
     size_t diag_newtri_pre_rpe = 0;
     if (visual_constraint_diag_enabled()) {
-        for (Track *track : diag_newly_triangulated_tracks) {
+        for (const Track *track : diag_newly_triangulated_tracks) {
             const auto x = track->get_landmark_point();
             int reason = 0;
             double rpe_sum = 0.0;
