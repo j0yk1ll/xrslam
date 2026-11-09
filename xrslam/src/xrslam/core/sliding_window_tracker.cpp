@@ -23,6 +23,7 @@
 #include <cstdlib>
 #include <exception>
 #include <limits>
+#include <unordered_map>
 
 namespace xrslam {
 
@@ -4043,6 +4044,50 @@ void SlidingWindowTracker::refine_window() {
                      keyframe_j->image->t, diag_visual, diag_imu,
                      diag_tracks, map->frame_num());
     }
+
+    // Classify the same newly triangulated tracks immediately before and
+    // after optimization. Diagnostics never alter track state or factors.
+    std::unordered_map<const Track *, int> diag_newtri_pre;
+    size_t diag_newtri_pre_valid = 0;
+    size_t diag_newtri_pre_depth_low = 0;
+    size_t diag_newtri_pre_depth_high = 0;
+    size_t diag_newtri_pre_rpe = 0;
+    if (visual_constraint_diag_enabled()) {
+        for (Track *track : diag_newly_triangulated_tracks) {
+            const auto x = track->get_landmark_point();
+            int reason = 0;
+            double rpe_sum = 0.0;
+            double rpe_count = 0.0;
+            for (const auto &[frame, keypoint_index] : track->keypoint_map()) {
+                if (!frame->tag(FT_KEYFRAME))
+                    continue;
+                const PoseState pose = frame->get_pose(frame->camera);
+                const vector<3> y = pose.q.conjugate() * (x - pose.p);
+                if (y.z() <= 1.0e-3) {
+                    reason = 1;
+                    break;
+                }
+                if (y.z() > 50) {
+                    reason = 2;
+                    break;
+                }
+                rpe_sum +=
+                    (apply_k(y, frame->K) -
+                     apply_k(frame->get_keypoint(keypoint_index), frame->K))
+                        .norm();
+                rpe_count += 1.0;
+            }
+            if (!reason && !(rpe_sum / std::max(rpe_count, 1.0) < 3.0))
+                reason = 3;
+            diag_newtri_pre.emplace(track, reason);
+            switch (reason) {
+            case 0: ++diag_newtri_pre_valid; break;
+            case 1: ++diag_newtri_pre_depth_low; break;
+            case 2: ++diag_newtri_pre_depth_high; break;
+            default: ++diag_newtri_pre_rpe; break;
+            }
+        }
+    }
     solver->solve();
 
     size_t diag_depth_low = 0;
@@ -4063,6 +4108,10 @@ void SlidingWindowTracker::refine_window() {
     size_t diag_newtri_depth_high = 0;
     size_t diag_newtri_rpe = 0;
     size_t diag_newtri_valid_to_invalid = 0;
+    size_t diag_newtri_prevalid_postinvalid = 0;
+    size_t diag_newtri_prehigh_posthigh = 0;
+    size_t diag_newtri_prelow_postlow = 0;
+    size_t diag_newtri_preinvalid_postvalid = 0;
     for (size_t k = 0; k < map->track_num(); ++k) {
         Track *track = map->get_track(k);
         if (track->tag(TT_TRIANGULATED)) {
@@ -4114,6 +4163,18 @@ void SlidingWindowTracker::refine_window() {
                     ++diag_newtri_rpe;
                 if (diag_was_valid && !is_valid)
                     ++diag_newtri_valid_to_invalid;
+                const auto pre_it = diag_newtri_pre.find(track);
+                if (pre_it != diag_newtri_pre.end()) {
+                    const int pre = pre_it->second;
+                    if (pre == 0 && !is_valid)
+                        ++diag_newtri_prevalid_postinvalid;
+                    if (pre == 2 && diag_depth_failure == 2)
+                        ++diag_newtri_prehigh_posthigh;
+                    if (pre == 1 && diag_depth_failure == 1)
+                        ++diag_newtri_prelow_postlow;
+                    if (pre != 0 && is_valid)
+                        ++diag_newtri_preinvalid_postvalid;
+                }
             }
             if (visual_constraint_diag_enabled()) {
                 if (diag_was_valid && !is_valid)
@@ -4151,7 +4212,13 @@ void SlidingWindowTracker::refine_window() {
                      "trash_to_valid=%zu depth_high_preinvalid=%zu "
                      "depth_high_pretrash=%zu newtri_accepted=%zu "
                      "newtri_depth_low=%zu newtri_depth_high=%zu "
-                     "newtri_rpe=%zu newtri_valid_to_invalid=%zu\n",
+                     "newtri_rpe=%zu newtri_valid_to_invalid=%zu "
+                     "newtri_pre_valid=%zu newtri_pre_depth_low=%zu "
+                     "newtri_pre_depth_high=%zu newtri_pre_rpe=%zu "
+                     "newtri_prevalid_postinvalid=%zu "
+                     "newtri_prehigh_posthigh=%zu "
+                     "newtri_prelow_postlow=%zu "
+                     "newtri_preinvalid_postvalid=%zu\n",
                      keyframe_j->image->t, diag_accepted, diag_depth_low,
                      diag_depth_high, diag_reprojection, diag_untriangulated,
                      diag_new_trash, map->track_num(),
@@ -4160,7 +4227,13 @@ void SlidingWindowTracker::refine_window() {
                      diag_trash_to_valid, diag_depth_high_preinvalid,
                      diag_depth_high_pretrash, diag_newtri_accepted,
                      diag_newtri_depth_low, diag_newtri_depth_high,
-                     diag_newtri_rpe, diag_newtri_valid_to_invalid);
+                     diag_newtri_rpe, diag_newtri_valid_to_invalid,
+                     diag_newtri_pre_valid, diag_newtri_pre_depth_low,
+                     diag_newtri_pre_depth_high, diag_newtri_pre_rpe,
+                     diag_newtri_prevalid_postinvalid,
+                     diag_newtri_prehigh_posthigh,
+                     diag_newtri_prelow_postlow,
+                     diag_newtri_preinvalid_postvalid);
         diag_newly_triangulated_tracks.clear();
     }
 }
