@@ -4052,6 +4052,11 @@ void SlidingWindowTracker::refine_window() {
     size_t diag_newtri_pre_depth_low = 0;
     size_t diag_newtri_pre_depth_high = 0;
     size_t diag_newtri_pre_rpe = 0;
+    size_t diag_newtri_prehigh_parallax_lt_0p2 = 0;
+    size_t diag_newtri_prehigh_parallax_lt_1 = 0;
+    size_t diag_newtri_prevalid_parallax_lt_0p2 = 0;
+    size_t diag_newtri_prevalid_parallax_lt_1 = 0;
+    size_t diag_newtri_parallax_nonfinite = 0;
     if (visual_constraint_diag_enabled()) {
         for (const Track *track : diag_newly_triangulated_tracks) {
             const auto x = track->get_landmark_point();
@@ -4080,6 +4085,26 @@ void SlidingWindowTracker::refine_window() {
             if (!reason && !(rpe_sum / std::max(rpe_count, 1.0) < 3.0))
                 reason = 3;
             diag_newtri_pre.emplace(track, reason);
+            // Parallax is measured from the estimated camera centers and the
+            // newly reconstructed point. It is not a measured physical angle.
+            const double parallax = track->triangulation_angle(x);
+            if (!std::isfinite(parallax)) {
+                ++diag_newtri_parallax_nonfinite;
+            } else if (reason == 2 || reason == 0) {
+                constexpr double deg_to_rad = 0.017453292519943295;
+                if (parallax < 0.2 * deg_to_rad) {
+                    if (reason == 2)
+                        ++diag_newtri_prehigh_parallax_lt_0p2;
+                    else
+                        ++diag_newtri_prevalid_parallax_lt_0p2;
+                }
+                if (parallax < 1.0 * deg_to_rad) {
+                    if (reason == 2)
+                        ++diag_newtri_prehigh_parallax_lt_1;
+                    else
+                        ++diag_newtri_prevalid_parallax_lt_1;
+                }
+            }
             switch (reason) {
             case 0: ++diag_newtri_pre_valid; break;
             case 1: ++diag_newtri_pre_depth_low; break;
@@ -4218,7 +4243,12 @@ void SlidingWindowTracker::refine_window() {
                      "newtri_prevalid_postinvalid=%zu "
                      "newtri_prehigh_posthigh=%zu "
                      "newtri_prelow_postlow=%zu "
-                     "newtri_preinvalid_postvalid=%zu\n",
+                     "newtri_preinvalid_postvalid=%zu "
+                     "newtri_prehigh_parallax_lt_0p2=%zu "
+                     "newtri_prehigh_parallax_lt_1=%zu "
+                     "newtri_prevalid_parallax_lt_0p2=%zu "
+                     "newtri_prevalid_parallax_lt_1=%zu "
+                     "newtri_parallax_nonfinite=%zu\n",
                      keyframe_j->image->t, diag_accepted, diag_depth_low,
                      diag_depth_high, diag_reprojection, diag_untriangulated,
                      diag_new_trash, map->track_num(),
@@ -4233,7 +4263,12 @@ void SlidingWindowTracker::refine_window() {
                      diag_newtri_prevalid_postinvalid,
                      diag_newtri_prehigh_posthigh,
                      diag_newtri_prelow_postlow,
-                     diag_newtri_preinvalid_postvalid);
+                     diag_newtri_preinvalid_postvalid,
+                     diag_newtri_prehigh_parallax_lt_0p2,
+                     diag_newtri_prehigh_parallax_lt_1,
+                     diag_newtri_prevalid_parallax_lt_0p2,
+                     diag_newtri_prevalid_parallax_lt_1,
+                     diag_newtri_parallax_nonfinite);
         diag_newly_triangulated_tracks.clear();
     }
 }
